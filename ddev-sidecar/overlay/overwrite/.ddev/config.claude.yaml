@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# Replaces the add-on's config.claude.yaml.
+#
+# DDEV's generated-file marker is left out, so add-on updates leave this file
+# alone and upstream changes to it need a manual diff.
+#
+# The add-on's version declares this hook:
+#
+#     hooks:
+#       pre-start:
+#         - exec-host: ".ddev/claude/build-image.sh"
+#
+# exec-host runs on the host, as the developer, at every ddev start and ddev
+# restart. The script it names is inside the project tree the sidecar
+# mounts, so an agent that appended a line to it would have that line run on
+# the developer's machine at the next restart, with their keys and unfiltered
+# network, and the add-on's .gitignore entries hide several of the files
+# around it from git status.
+#
+# Without the hook, the image is regenerated only on request:
+#
+#     ddev claude rebuild     regenerate .ddev/claude/Dockerfile
+#     ddev restart            build and start it
+#
+# Run both after changing claude.yaml, the build fragment, the domain list or
+# any other file the image is built from.
+# ---------------------------------------------------------------------------

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS only. A launchd agent that keeps the Context7 proxy running while you
+  are logged in. launchd does not expand ~ or $HOME, so replace YOUR-USER in
+  every path below before installing. README.md has the steps.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.context7-proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/Users/YOUR-USER/.config/context7-proxy/start-proxy.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Homebrew's two prefixes, so start-proxy.sh finds caddy. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>CONTEXT7_API_KEY_FILE</key>
+    <string>/Users/YOUR-USER/.config/context7-proxy/api-key</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR-USER/.config/context7-proxy/proxy.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR-USER/.config/context7-proxy/proxy.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,35 @@
+# Context7 MCP proxy, run on the host by start-proxy.sh.
+#
+# Takes requests from the sidecar, which carry a placeholder Authorization
+# header, replaces that header with the key in CONTEXT7_API_KEY, and forwards
+# them to Context7 over HTTPS. The key stays in this process and never enters
+# a container.
+{
+	admin off          # no config API, so nothing else can reconfigure the proxy
+	auto_https off     # plain HTTP on the loopback; no certificates to manage
+	persist_config off # the loaded config is not saved to disk
+}
+
+:8788 {
+	# Loopback only, both families, so nothing on the network can use the key.
+	# On Docker Desktop the sidecar reaches this through host.docker.internal.
+	# README.md says what to change when your Docker does not.
+	bind 127.0.0.1 [::1]
+
+	# Answers the README's host check and the probe `ddev claude` runs before a
+	# session, so "ok" means this proxy holds the port.
+	@health path /healthz
+	respond @health "ok" 200
+
+	# The sidecar's .mcp.json entry points at /context7/mcp. handle_path strips
+	# /context7, so Context7 receives /mcp.
+	handle_path /context7/* {
+		reverse_proxy https://mcp.context7.com {
+			header_up Host mcp.context7.com
+			header_up Authorization "Bearer {env.CONTEXT7_API_KEY}"
+
+			# MCP streams its responses; send each part as it arrives.
+			flush_interval -1
+		}
+	}
+}

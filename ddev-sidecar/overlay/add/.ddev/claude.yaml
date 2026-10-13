@@ -1,0 +1,15 @@
+# Project config for the ddev-claude add-on, read by its image builder,
+# .ddev/claude/build-image.sh. List keys take a block list or `[]`; the
+# builder rejects other inline lists.
+#
+# mount_mode: bind keeps the project a plain bind mount, which the launcher
+# and the read-only remounts of .ddev and .git assume. Without it the builder
+# uses DDEV's Mutagen volume whenever the project's or the global DDEV config
+# sets performance_mode: mutagen, or, with neither set, on macOS and Windows.
+# plugins: [] stops the builder enabling its default plugins, which writes
+# marketplace domains into .ddev/claude/extra-domains.list; the firewall does
+# not read that file and prints a warning about it at every launch.
+# No extras: the kit's build fragment in claude.local/ installs PHP in place
+# of the php extra.
+mount_mode: bind
+plugins: []

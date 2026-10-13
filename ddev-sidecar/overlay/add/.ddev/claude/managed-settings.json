@@ -1,0 +1,173 @@
+{
+  "_comment": "Baked into the sidecar image at /etc/claude-code/managed-settings.json, root-owned and read-only: edit this file on the host and rebuild. (1) The allowManaged*Only flags stop user and project settings from adding permission rules or hooks or widening the MCP server list, so a rule missing here prompts or fails until the next rebuild. (2) Each file rule outside the home folder (~/) comes in both anchored spellings: ./**/x matches at any depth under the session's working folder, //**/x anywhere on the filesystem. (3) Only Read() and Edit() file rules are checked, and Edit covers every file-editing tool. A Read deny does not cover NotebookEdit, so a path that must also stay unwritten carries an Edit deny too. (4) Bash rules match the start of the command as typed, so a leading path, wrapper or global option slips past them; git is screened by the git-screen.sh hook instead. (5) To add an MCP server, add it to allowedMcpServers and its name to enabledMcpjsonServers. (6) statusLine runs outside the permission system, so it names a root-owned script. (7) Every use of a tool listed in permissions.ask prompts the user. Artifact is listed because it publishes content to claude.ai, outside the sandbox; another tool's name, or Tool(specifier) for some uses only, gates that tool the same way. (8) WebFetch and WebSearch are denied: search runs outside the container, where the firewall does not apply, and both read untrusted pages into context. To lift either, remove it from permissions.deny and rebuild; each use then prompts, since permissions.allow does not name it.",
+  "autoUpdatesChannel": "stable",
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "Read",
+      "Glob",
+      "Grep",
+      "TodoWrite",
+      "Skill",
+      "ToolSearch",
+      "AskUserQuestion",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs"
+    ],
+    "ask": [
+      "Artifact"
+    ],
+    "deny": [
+      "Bash(claude update:*)",
+      "Bash(claude install:*)",
+      "Bash(claude migrate-installer:*)",
+      "Bash(claude config set:*)",
+      "Bash(claude config add:*)",
+      "Bash(claude config remove:*)",
+      "Bash(claude config rm:*)",
+      "Bash(claude mcp add:*)",
+      "Bash(claude mcp remove:*)",
+      "Bash(claude plugin:*)",
+      "Bash(claude setup-token:*)",
+      "Bash(composer install:*)",
+      "Bash(composer update:*)",
+      "Bash(composer require:*)",
+      "Bash(composer remove:*)",
+      "Bash(composer create-project:*)",
+      "Bash(composer global:*)",
+      "Bash(composer self-update:*)",
+      "Bash(composer config:*)",
+      "Bash(npm install:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm update:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm add:*)",
+      "Bash(npm remove:*)",
+      "Bash(npm exec:*)",
+      "Bash(npm publish:*)",
+      "Bash(npm unpublish:*)",
+      "Bash(npm login:*)",
+      "Bash(npm adduser:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm remove:*)",
+      "Bash(pnpm update:*)",
+      "Bash(yarn install:*)",
+      "Bash(yarn add:*)",
+      "Bash(yarn remove:*)",
+      "Bash(yarn upgrade:*)",
+      "Bash(yarn dlx:*)",
+      "Bash(pnpm dlx:*)",
+      "Bash(npx:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(python3 -m pip install:*)",
+      "Bash(gem install:*)",
+      "Bash(cargo install:*)",
+      "Bash(cargo add:*)",
+      "Bash(mysqldump:*)",
+      "Bash(rm -rf:*)",
+      "Bash(rm -r:*)",
+      "Bash(rm -R:*)",
+      "Bash(rm -fr:*)",
+      "Bash(rm -fR:*)",
+      "Bash(rm --recursive:*)",
+      "Bash(dd:*)",
+      "Bash(shred:*)",
+      "Bash(mkfs:*)",
+      "Bash(chmod -R:*)",
+      "Bash(truncate:*)",
+      "Bash(sudo:*)",
+      "Read(./**/.env*)",
+      "Read(//**/.env*)",
+      "Edit(./**/.env*)",
+      "Edit(//**/.env*)",
+      "Read(~/.ssh/**)",
+      "Edit(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Edit(~/.aws/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Edit(~/.claude/.credentials.json)",
+      "WebFetch",
+      "WebSearch",
+      "Read(./**/*.sql)",
+      "Read(//**/*.sql)",
+      "Edit(./**/*.sql)",
+      "Edit(//**/*.sql)",
+      "Read(./**/*.sql.gz)",
+      "Read(//**/*.sql.gz)",
+      "Edit(./**/*.sql.gz)",
+      "Edit(//**/*.sql.gz)",
+      "Read(./**/*.sql.bz2)",
+      "Read(//**/*.sql.bz2)",
+      "Edit(./**/*.sql.bz2)",
+      "Edit(//**/*.sql.bz2)",
+      "Read(./**/*.sql.zip)",
+      "Read(//**/*.sql.zip)",
+      "Edit(./**/*.sql.zip)",
+      "Edit(//**/*.sql.zip)",
+      "Read(./**/*.dump)",
+      "Read(//**/*.dump)",
+      "Edit(./**/*.dump)",
+      "Edit(//**/*.dump)",
+      "Read(./**/*.mysql)",
+      "Read(//**/*.mysql)",
+      "Edit(./**/*.mysql)",
+      "Edit(//**/*.mysql)",
+      "Read(./**/database-backups/**)",
+      "Read(//**/database-backups/**)",
+      "Edit(./**/database-backups/**)",
+      "Edit(//**/database-backups/**)",
+      "Read(./**/db_snapshots/**)",
+      "Read(//**/db_snapshots/**)",
+      "Edit(./**/db_snapshots/**)",
+      "Edit(//**/db_snapshots/**)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": true,
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [
+    {
+      "serverUrl": "http://host.docker.internal:8788/context7/mcp"
+    }
+  ],
+  "enabledMcpjsonServers": ["context7"],
+  "disableClaudeAiConnectors": true,
+  "statusLine": {
+    "type": "command",
+    "command": "/bin/bash /usr/local/lib/agent-container-kit/statusline-command.sh"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash /usr/local/lib/agent-container-kit/guardrail-protect.sh",
+            "timeout": 10,
+            "statusMessage": "Guardrail protect"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash /usr/local/lib/agent-container-kit/git-screen.sh",
+            "timeout": 10,
+            "statusMessage": "Git screen"
+          }
+        ]
+      }
+    ]
+  }
+}

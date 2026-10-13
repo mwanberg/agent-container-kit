@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Puts the project's database on the network docker-compose.zz-claude-overlay.yaml
+# declares for the sidecar. DDEV also attaches the sidecar to the project
+# network, where db already sits; whether db is reachable through that
+# network alone, without this file, is not established.
+#
+# A separate file because on a project without a database container, the
+# `db` below would have no image, and Compose rejects a service with neither
+# an image nor a build. Such a project deletes this file and leaves `db` off
+# CLAUDE_SIDECAR_SERVICES.
+#
+# Compose merges a service's network list, so db stays on the project default
+# network as well and web still reaches it.
+# ---------------------------------------------------------------------------
+
+services:
+  db:
+    networks:
+      - default
+      - claude-isolated

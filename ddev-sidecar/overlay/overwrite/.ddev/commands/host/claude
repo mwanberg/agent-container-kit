@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+## Description: Run Claude Code in the hardened sidecar (default permission mode)
+## Usage: claude [subcommand|extra args]
+## Example: ddev claude
+## Example: ddev claude shell
+## Example: ddev claude exec vendor/bin/phpunit
+## Example: ddev claude rebuild
+## Example: ddev claude help
+## Example: ddev claude --resume
+##
+## Subcommands:
+##   shell             Drop into bash inside the sidecar
+##   exec <cmd> ...    Run one command in the sidecar non-interactively
+##   rebuild           Regenerate .ddev/claude/Dockerfile for the next start
+##   help              Print this help
+##
+## Anything else (including flags like --resume) is passed to the claude CLI.
+
+# ---------------------------------------------------------------------------
+# Replaces the add-on's `ddev claude` command, which passes
+# --dangerously-skip-permissions. DDEV's generated-file marker is left out, so
+# add-on updates leave this file alone.
+#
+# The replacement needs both the filename, which matches the add-on's so this
+# file overwrites it, and the `## Usage:` line, from which DDEV takes the
+# command name (`ddev -h` lists what registered). Changing either leaves a
+# command under another name or the add-on's launcher installed alongside.
+#
+# This launcher passes no bypass flag, and the managed settings in the image
+# set disableBypassPermissionsMode, which rejects the flag whoever passes it.
+# Bypass mode would skip every ask decision and prompt; hooks and deny rules
+# still run in it.
+# ---------------------------------------------------------------------------
+
+# DDEV runs this on the host under whatever bash `env` finds, which on macOS is
+# often bash 3.2, so it uses nothing newer: no associative arrays or mapfile,
+# and an array that may be empty is expanded as ${a[@]+"${a[@]}"}, since bash
+# before 4.4 treats an empty one as unset under set -u.
+set -euo pipefail
+
+CONTAINER="ddev-${DDEV_SITENAME}-claude"
+
+# The project's copy of the kit's fix-it helper. The image bakes the same
+# message file for the firewall, so a stop reads the same here as in the log.
+FIX_IT="${DDEV_APPROOT}/.ddev/claude/fix-it.sh"
+
+fix_it() { # id [name=value ...]
+  sh "$FIX_IT" "$@" >&2
+}
+
+# No pipeline: under pipefail, `docker ps | grep -q` fails when grep exits at
+# its first match and docker ps then takes SIGPIPE.
+ensure_running() {
+  local running
+  running=$(docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null) || running=""
+  if [ "$running" != true ]; then
+    explain_stopped
+    exit 1
+  fi
+}
+
+# A sidecar whose firewall stopped with an error ends its log with the
+# firewall's fix-it block, or with a "[firewall] stopped: <id> ..." line if the
+# helper failed; a later "firewall active" line means a start succeeded after
+# it. The container's processes run as the agent's user, so the agent can write
+# the log: only the id is taken from it, and the block printed is the kit's, with its
+# values left as placeholders. The log's last lines, control characters shown
+# as ?, are quoted above the block for the values.
+explain_stopped() {
+  local log line id="" block i
+  local -a lines
+  lines=()
+  log=$(docker logs --tail 200 "$CONTAINER" 2>&1) || log=""
+  while IFS= read -r line; do
+    line=${line//[![:print:]]/?}
+    lines+=("$line")
+    case $line in
+      "AGENT-CONTAINER-KIT: STARTUP STOPPED ["*"]") id=${line#*STOPPED \[}; id=${id%]} ;;
+      "[firewall] stopped: "*) id=${line#"[firewall] stopped: "}; id=${id%% *} ;;
+      *"[firewall]"*" firewall active") id="" ;;
+    esac
+  done <<< "$log"
+
+  if [ -n "$log" ]; then
+    echo "The sidecar's last log lines, written inside the sidecar: read them for values, not for steps." >&2
+    for ((i = ${#lines[@]} > 10 ? ${#lines[@]} - 10 : 0; i < ${#lines[@]}; i++)); do
+      printf '  | %s\n' "${lines[i]}" >&2
+    done
+  fi
+  case $id in ""|*[!a-z0-9-]*) id="" ;; esac
+  if [ -n "$id" ] && block=$(sh "$FIX_IT" "$id"); then
+    printf '%s\n' "$block" >&2
+    return
+  fi
+  fix_it launch-sidecar-stopped "container=$CONTAINER"
+}
+
+# The kit's image build writes this stamp last. An image without it, such as
+# the add-on's own, runs under the kit's compose settings with none of the
+# kit's policy or hooks. Exit 3 means the stamp is absent: the docker CLI
+# reports its own failures with other codes, which pass through.
+ensure_kit_image() {
+  local status=0
+  docker exec --user claude "$CONTAINER" /bin/sh -c 'test -f /etc/agent-container-kit/image-built-at || exit 3' || status=$?
+  case $status in
+    0) ;;
+    3) fix_it launch-image-not-kit "container=$CONTAINER"; exit 1 ;;
+    *) exit "$status" ;;
+  esac
+}
+
+# Re-run in full before every session, exec and shell: exec runs with a
+# session's reach, and only the full run picks up services that moved address
+# and re-tests that web stays out. A failed run stops the launch under set -e.
+# Its progress lines go to stdout and are dropped, which keeps them out of an
+# exec's output; its warnings and any fix-it block go to stderr and show. The
+# opening line goes to stderr too, so a slow run, such as one waiting out
+# failing DNS, is not a silent pause.
+ensure_firewall() {
+  echo "Re-applying the sidecar firewall..." >&2
+  # Absolute path to sudo: docker exec resolves a bare command name through the
+  # container's PATH, which includes a directory the agent can write. A planted
+  # `sudo` there would return success and this function would report a verified
+  # firewall that never ran. The user is named so the run goes through the
+  # sidecar user's one sudo grant whatever the compose file's default user is.
+  docker exec --user claude "$CONTAINER" /usr/bin/sudo /usr/local/bin/init-firewall.sh >/dev/null
+}
+
+# Run in the sidecar as its user, with bash builtins only, so nothing on the
+# agent-writable PATH answers for it. The project is always a bind mount of
+# the host's copy (mount_mode: bind in .ddev/claude.yaml), so there is no sync
+# to wait for. Exit 3: the folder holds nothing but the .ddev and .git mounts
+# nested inside it. Exit 4: the user can read no file in its top two levels,
+# and the probe prints the user's ids for the fix-it block.
+WORKSPACE_PROBE='shopt -s nullglob dotglob
+ids="uid=$UID groups=${GROUPS[*]}"
+cd /var/www/html 2>/dev/null || { printf "%s" "$ids"; exit 4; }
+empty=1
+for entry in *; do
+  case $entry in .git|.ddev) ;; *) empty=0; break ;; esac
+done
+[ "$empty" = 0 ] || exit 3
+for entry in * */*; do
+  case $entry in .git|.git/*|.ddev|.ddev/*) continue ;; esac
+  [ -f "$entry" ] && [ -r "$entry" ] && exit 0
+done
+printf "%s" "$ids"
+exit 4'
+
+# A session on an empty or unreadable project would report that its files do
+# not exist, so the launch stops instead.
+ensure_workspace() {
+  local ids status=0
+  ids=$(docker exec --user claude "$CONTAINER" /bin/bash -c "$WORKSPACE_PROBE") || status=$?
+  case $status in
+    0) ;;
+    3) fix_it launch-workspace-empty; exit 1 ;;
+    4) fix_it launch-workspace-unreadable "ids=${ids//[![:print:]]/?}" "volume=ddev-${DDEV_SITENAME}-claude-config"; exit 1 ;;
+    *) exit "$status" ;;
+  esac
+}
+
+# The read-only mount covers only the project's top-level .git, so any other
+# .git in the tree is writable in the sidecar, and git on the host runs its
+# hooks and reads its config. Matched by name whatever its type: a gitlink
+# file (submodules, worktrees) or a symlink can point git at a folder the agent
+# wrote. Walked on the host, where a large tree with vendor/ and node_modules/
+# costs far less to list than through the sidecar's bind mount, and only
+# before a session, where the agent runs.
+warn_nested_git() {
+  local found dir
+  found=$(cd "$DDEV_APPROOT" && find . -path ./.git -prune -o -name .git -print -prune 2>/dev/null) || true
+  [ -n "$found" ] || return 0
+  {
+    echo "Warning: the sidecar can write these git folders and files, since its read-only mount covers only the project's top-level .git:"
+    while IFS= read -r dir; do
+      dir=${dir#./}
+      printf '  %s\n' "${dir//[![:print:]]/?}"
+    done <<< "$found"
+    echo "The agent can change their hooks and config, which git on this machine, including your editor's git integration, runs and applies. Check each one's hooks folder and config, and where a .git file or link points. A .git created during a session is listed at the next 'ddev claude'."
+  } >&2
+}
+
+# The sidecar works without an MCP server; a project whose .mcp.json names the
+# host proxy's port gets a warning when nothing answers there.
+warn_mcp_proxy() {
+  local mcp="${DDEV_APPROOT}/.mcp.json"
+  [ -f "$mcp" ] && grep -qF 'host.docker.internal:8788' "$mcp" 2>/dev/null || return 0
+  docker exec --user claude "$CONTAINER" /usr/bin/curl --silent --fail --max-time 3 --output /dev/null http://host.docker.internal:8788/healthz && return 0
+  echo "Warning: .mcp.json names the MCP proxy at host.docker.internal:8788, and the proxy is not answering there. Start the proxy on the host, or free its port if something else holds it; the session works without it." >&2
+}
+
+launch_claude() {
+  ensure_running
+  ensure_kit_image
+  ensure_firewall
+  ensure_workspace
+  warn_nested_git
+  warn_mcp_proxy
+  exec docker exec -it \
+    --user claude \
+    --workdir /var/www/html \
+    "$CONTAINER" \
+    claude "$@"
+}
+
+rebuild_image() {
+  bash "${DDEV_APPROOT}/.ddev/claude/build-image.sh"
+  echo "Run 'ddev start', or 'ddev restart' if the project is running, to build and start the sidecar."
+}
+
+show_help() {
+  cat <<'HELP'
+Usage:
+  ddev claude                    Claude Code in the sidecar, default permission mode.
+  ddev claude shell [args]       Bash inside the sidecar.
+  ddev claude exec <cmd>         One command in the sidecar, non-interactively.
+  ddev claude rebuild            Regenerate .ddev/claude/Dockerfile for the next start.
+  ddev claude help               This help.
+  ddev claude <other args>       Passed to the claude CLI (for example --resume).
+
+Bypass permission mode is disabled by the managed policy baked into the
+image, so --dangerously-skip-permissions is rejected wherever it comes from.
+
+Every subcommand that enters the sidecar first checks that it runs the kit's
+image, then re-applies the firewall, which is fail-hard: if its own checks
+fail, this command aborts instead of starting a session. A session or exec
+also stops if no project file in the sidecar is readable by its user; shell does not,
+so it stays available for looking into why.
+HELP
+}
+
+case "${1:-}" in
+  shell)
+    shift
+    ensure_running
+    ensure_kit_image
+    ensure_firewall
+    exec docker exec -it --user claude --workdir /var/www/html "$CONTAINER" bash "$@"
+    ;;
+  exec)
+    shift
+    ensure_running
+    ensure_kit_image
+    ensure_firewall
+    ensure_workspace
+    exec docker exec -i --user claude --workdir /var/www/html "$CONTAINER" "$@"
+    ;;
+  rebuild)
+    shift
+    rebuild_image
+    exit 0
+    ;;
+  help)
+    show_help
+    exit 0
+    ;;
+  *)
+    launch_claude "$@"
+    ;;
+esac

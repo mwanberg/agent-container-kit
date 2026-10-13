@@ -1,0 +1,513 @@
+# Fix-it messages: the text of every block the kit prints when it stops an
+# image build, a sidecar start or a launch, and of every deny or ask the guard
+# hooks give in a session. This file is the only copy of that text; fix-it.sh,
+# beside it, prints one block by id.
+#
+# The image build bakes both files into /usr/local/lib/agent-container-kit/,
+# where the build checks, the firewall and the guard hooks read them. Without
+# the baked copy the hooks fall back to fixed texts that give only the id. The
+# launcher, `ddev claude`, runs the project's copy on the host.
+#
+# tools/message-ids.py, run from the kit's root folder as
+# python3 -I tools/message-ids.py ddev-sidecar, lists every id a kit file names
+# that this file lacks and every id this file defines twice, both of which
+# fail the run, and every id no kit file names.
+#
+# Format, one line per part, read line by line with no other tools:
+#
+#   [id]              starts a message; the id is printed in its header
+#   stage: BUILD      or STARTUP, LAUNCH or GUARD; the header reads AGENT-CONTAINER-KIT: <stage> STOPPED
+#   failed: ...       what failed
+#   asks: ...         in place of stage: and failed:, in a block that prompts
+#                     the user to approve instead of stopping; the header reads
+#                     AGENT-CONTAINER-KIT: GUARD ASKS and the text follows unlabelled
+#   means: ...        what that means
+#   fix: ...          one numbered step per line, at most three, the last the
+#                     one that applies the fix
+#
+# {name} in any part is a value the caller passes as name=value. A block is at
+# most six lines, with the line that matters most last, so that as much of it
+# as possible survives in Docker's failure summary, which repeats the end of a
+# failed step's output.
+
+# ---- Sidecar start: the firewall --------------------------------------------
+
+[firewall-not-root]
+stage: STARTUP
+failed: The sidecar firewall was run without root, so it changed nothing.
+means: The firewall runs as root only through the sidecar's one sudo permission, which `ddev start` and `ddev claude` use.
+fix: Run `ddev claude`, which re-runs the firewall through sudo before opening a session.
+
+[firewall-tool-missing]
+stage: STARTUP
+failed: The firewall needs `{tool}`, which the sidecar image does not have.
+means: Without it the firewall cannot build or verify its rules, so the sidecar does not start and `ddev claude` opens no session.
+fix: Find the step in `.ddev/claude.local/Dockerfile.fragment` that removes packages (`apt-get purge`, `apt-get remove` or `--auto-remove`) and keep the package that provides `{tool}`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-cannot-close]
+stage: STARTUP
+failed: The firewall could not set its DROP policies: `{command}` exited with status {status}.
+means: The firewall cannot filter traffic in this container, so the sidecar does not start.
+fix: Check that `ddev utility compose-config` lists `NET_ADMIN` and `NET_RAW` under `cap_add` for the claude service, as `.ddev/docker-compose.claude.yaml` grants them.
+fix: Run `ddev restart`.
+
+[firewall-ipv6-failed]
+stage: STARTUP
+failed: The container has IPv6 addresses, and the firewall could not {step}.
+means: Unfiltered IPv6 would bypass every IPv4 rule, so the sidecar does not start and `ddev claude` opens no session.
+fix: Run `ddev restart`.
+fix: If it stops here again, the Docker host cannot filter IPv6 for containers: turn on IPv6 filtering in the host's kernel or turn IPv6 off on the project's Docker networks, then run `ddev restart`.
+
+[firewall-step-failed]
+stage: STARTUP
+failed: The firewall stopped at line {line_no} of /usr/local/bin/init-firewall.sh: `{command}` exited with status {status}.
+means: Every default policy stays DROP, so nothing gets out beyond the rules already installed, and the sidecar does not start or `ddev claude` opens no session.
+fix: Read the lines above this block for the failing command's own error.
+fix: Run `ddev restart`; if it stops at the same line again, compare `.ddev/claude/init-firewall.sh` with the kit's copy and undo any change.
+
+[firewall-lock-busy]
+stage: STARTUP
+failed: Another firewall run held the firewall's lock for over 60 seconds.
+means: A container start and a `ddev claude` launch, or two launches, overlapped; this run changed nothing and opened no session.
+fix: Wait a minute, then run `ddev claude` again.
+fix: If it stops here again, run `ddev restart`, which ends any stuck run.
+
+[firewall-config-untrusted]
+stage: STARTUP
+failed: The firewall rejected {file}: it {problem}.
+means: The firewall reads its settings only from root-owned, read-only files the image build writes, so the sidecar does not start.
+fix: Restore the lines that write /etc/agent-container-kit/ in `.ddev/claude/Dockerfile.base` from the kit's copy, and remove any step in `.ddev/claude.local/Dockerfile.fragment` that writes there.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-domains-crlf]
+stage: STARTUP
+failed: The egress domains list has Windows (CRLF) line endings, first at line {line_no}.
+means: The firewall reads one domain name per line and rejects the whole list, so the sidecar does not start.
+fix: Remove the carriage returns: `perl -pi -e 's/\r$//' .ddev/claude/egress-domains.list`
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-domain-invalid]
+stage: STARTUP
+failed: Line {line_no} of the egress domains list is not a single domain name: `{line}`
+means: Each entry goes to the resolver and into the DNS helper's configuration, so the firewall rejects the list, and the sidecar does not start.
+fix: Make line {line_no} of `.ddev/claude/egress-domains.list` one domain name, optionally followed by a `#` comment.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-domains-empty]
+stage: STARTUP
+failed: The egress domains list names no domain.
+means: With nothing allowlisted Claude Code cannot reach Anthropic, so the firewall stops and the sidecar does not start.
+fix: Put the kit's domain lines back in `.ddev/claude/egress-domains.list`, starting with `api.anthropic.com`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-no-gateway]
+stage: STARTUP
+failed: The firewall found no default route, so it cannot determine which address is the host.
+means: It needs the host's address to keep the host unreachable, so the sidecar does not start.
+fix: Check that `ddev utility compose-config` lists the `claude-isolated` network for the claude service, as `.ddev/docker-compose.zz-claude-overlay.yaml` declares it.
+fix: Run `ddev restart`.
+
+[firewall-allowlist-unresolved]
+stage: STARTUP
+failed: No domain in the egress domains list resolved to an address.
+means: DNS or the network is down, or the listed domains are wrong; any allowlist already in service stays, and the sidecar does not start or `ddev claude` opens no session.
+fix: Check that the host is online and that `.ddev/claude/egress-domains.list` names real domains.
+fix: Run `ddev claude` again, or `ddev restart` if the sidecar is not running.
+
+[firewall-service-invalid]
+stage: STARTUP
+failed: The reachable services list holds `{entry}`, which is not a DDEV service name.
+means: The firewall accepts only named services and rejects the list, so the sidecar does not start.
+fix: Set `CLAUDE_SIDECAR_SERVICES` under `build: args:` in `.ddev/docker-compose.zz-claude-overlay.yaml` to service names separated by spaces, such as `db`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-web-listed]
+stage: STARTUP
+failed: The reachable services list names `web`.
+means: The web container has unfiltered internet access and serves files the agent can write, so a route to it bypasses the egress allowlist; the sidecar does not start.
+fix: Remove `web` from `CLAUDE_SIDECAR_SERVICES` in `.ddev/docker-compose.zz-claude-overlay.yaml`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-dns-helper-failed]
+stage: STARTUP
+failed: The firewall's DNS helper, dnsmasq, {problem}.
+means: Without it the allowlist cannot follow address changes, so the sidecar does not start or `ddev claude` opens no session.
+fix: Run `ddev restart`, which starts the sidecar and its DNS helper afresh.
+
+[firewall-verify-failed]
+stage: STARTUP
+failed: The firewall's check of its own rules failed: {check}.
+means: Egress is not contained, so the firewall stops; a sidecar that was already running keeps these rules until it stops.
+fix: Run `ddev stop`.
+fix: Compare `.ddev/claude/init-firewall.sh` and `.ddev/claude/Dockerfile.base` with the kit's copies and undo any change.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-web-reachable]
+stage: STARTUP
+failed: The sidecar can reach the web container: {how}.
+means: Web has unfiltered internet access and serves files the agent can write, so this route bypasses the egress allowlist; a sidecar that was already running keeps it until it stops.
+fix: Run `ddev stop`.
+fix: Remove from `CLAUDE_SIDECAR_SERVICES` in `.ddev/docker-compose.zz-claude-overlay.yaml` any service that is web under another name, remove from `.ddev/claude/egress-domains.list` any domain that resolves to web's address, and undo any change to `.ddev/claude/init-firewall.sh`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[firewall-web-unresolved]
+stage: STARTUP
+failed: The name `web` did not resolve in the sidecar, so the firewall could not check that the web container is kept out.
+means: Web has unfiltered internet access, so a route to it would bypass the egress allowlist, and the firewall cannot rule one out; the sidecar does not start or `ddev claude` opens no session.
+fix: Run `ddev describe` and check that the web service is running.
+fix: Run `ddev restart`.
+
+# ---- Launch: ddev claude, on the host ---------------------------------------
+
+[launch-sidecar-stopped]
+stage: LAUNCH
+failed: The sidecar container {container} is not running, and its recent log holds no stop from the kit.
+means: The project is stopped, or the sidecar exited for a reason the firewall did not report; `ddev claude` opens no session.
+fix: Read the log lines above this block, if any; `docker logs {container}` shows the whole log.
+fix: Run `ddev start`, or `ddev restart` if the project is already running.
+
+[launch-image-not-kit]
+stage: LAUNCH
+failed: The sidecar container {container} has no /etc/agent-container-kit/image-built-at, which the kit's image build writes last.
+means: The sidecar runs an image not built from the kit's Dockerfile.base, such as the add-on's own, which carries none of the kit's managed policy or hooks; `ddev claude` opens no session.
+fix: Run `ddev claude rebuild`, which regenerates `.ddev/claude/Dockerfile` from `.ddev/claude/Dockerfile.base`.
+fix: Run `ddev restart`.
+
+[launch-workspace-empty]
+stage: LAUNCH
+failed: The project folder /var/www/html in the sidecar holds nothing but the .ddev and .git folders.
+means: The project is not mounted into the sidecar, and a session would report that its files do not exist, so `ddev claude` opens no session.
+fix: Check that `ddev utility compose-config` mounts the project folder at /var/www/html for the claude service, as `.ddev/docker-compose.claude-mounts.yaml` declares.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[launch-workspace-unreadable]
+stage: LAUNCH
+failed: The sidecar's user ({ids}) can read no file in the top two levels of the project folder /var/www/html.
+means: The image build gives that user the host user's ids, except an id another account in the image already holds, which the build output names. That exception, an image built before the host's ids changed, or project files closed to those ids leave the project unreadable, so `ddev claude` opens no session.
+fix: On the host, compare `id -u` with the uid above, and run `ls -ln` in the project folder to see its files' owners and modes.
+fix: If the uid differs, run `ddev restart --no-cache` to rebuild the sidecar with the host's current ids; if Claude Code then cannot save its login or settings, run `ddev stop`, `docker volume rm {volume}` (this signs it out) and `ddev start`, once.
+fix: If the uid matches, or still differs after that rebuild because another account in the image holds the host's, give the uid above read access to the project's files on the host, then run `ddev claude` again.
+
+# ---- Image build: the build fragment ----------------------------------------
+
+[build-fragment-placeholder]
+stage: BUILD
+failed: The build fragment's {name} value is `{value}`, which is not {form}.
+means: The fragment installs packages by this value, so the build stops here instead of failing later inside apt or npm.
+fix: In `.ddev/claude.local/Dockerfile.fragment`, set {name} to {form}, {where}; the fragment's comments show how to find the value.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-node-not-installed]
+stage: BUILD
+failed: The build fragment sets Node {wanted} from NodeSource; the image has Node {found}, and npm is {npm}.
+means: NodeSource has no Node {wanted} package for this system, or another repository's Node was installed in its place. The optional blocks that run npm cannot build without NodeSource's Node.
+fix: In `.ddev/claude.local/Dockerfile.fragment`, set NODE_MAJOR on its ARG line after the header to a current long-term-support Node major version.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-fragment-node-too-old]
+stage: BUILD
+failed: The build fragment's {block} block needs Node {minimum} or newer, and the fragment's Node step installs Node {found}.
+means: The block's packages do not load on Node {found}, so the build stops here.
+fix: In `.ddev/claude.local/Dockerfile.fragment`, set NODE_MAJOR on its ARG line after the header to {minimum} or newer, or turn the {block} block off, as the fragment's header describes.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-fragment-block-needs]
+stage: BUILD
+failed: The build fragment's {block} block is on, and the {needs} block it builds on is off.
+means: The {block} block installs into what the {needs} block sets up, so the build stops here.
+fix: In `.ddev/claude.local/Dockerfile.fragment`, turn on the {needs} block, or turn the {block} block off, as the fragment's header describes.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-repository-key-download-failed]
+stage: BUILD
+failed: The signing key at {url} could not be downloaded, or arrived empty.
+means: The build verifies that key before it installs {packages}, so it stops here.
+fix: Check that the host is online and that `curl -fsSL {url}` prints a key.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-sury-key-mismatch]
+stage: BUILD
+failed: The keyring from packages.sury.org is not the pinned key alone; its primary keys: {primaries}.
+means: Apt accepts every key in the keyring for Sury's packages, so the build accepts only the pinned key and installs no PHP.
+fix: Print its keys with the command in the Sury comment of `.ddev/claude.local/Dockerfile.fragment`.
+fix: If it holds one key and Sury publishes that fingerprint, put it in place of the pin, then run `ddev claude rebuild` and `ddev restart`.
+
+[build-nodesource-key-mismatch]
+stage: BUILD
+failed: The keyring from deb.nodesource.com is not the pinned key alone; its primary keys: {primaries}.
+means: Apt accepts every key in the keyring for NodeSource's packages, so the build accepts only the pinned key and installs no Node.
+fix: Print its keys with the command in the NodeSource comment of `.ddev/claude.local/Dockerfile.fragment`.
+fix: If it holds one key and NodeSource publishes that fingerprint, put it in place of the pin, then run `ddev claude rebuild` and `ddev restart`.
+
+[build-browser-driver-mismatch]
+stage: BUILD
+failed: chromedriver reports major version `{driver}` and chromium `{browser}`, and the Drupal test stack needs one matched pair.
+means: Debian builds both from one source, so another step installed a different browser or driver, or the package mirror was mid-update.
+fix: Remove any other chromium or chromedriver install from `.ddev/claude.local/Dockerfile.fragment` and from the extras in `.ddev/claude.yaml`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-lint-package-missing]
+stage: BUILD
+failed: The lint block's package list installed no `{tool}`.
+means: The lint block links eslint, prettier, stylelint and cspell, and the list printed from core's package.json holds every one of them.
+fix: Replace the package list in the lint block of `.ddev/claude.local/Dockerfile.fragment` with the one its comment's command prints from the project's `core/package.json`.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+# ---- Image build: the guardrail layers --------------------------------------
+
+[build-sudo-unsafe]
+stage: BUILD
+failed: The image's sudo setup failed the build check: {check}.
+means: The build accepts one root access for the sidecar's user, the firewall script through the real sudo, so it stops.
+fix: Make `FROM` in `.ddev/claude/Dockerfile.base` match the kit's copy, and remove any step in `.ddev/claude.local/Dockerfile.fragment` that changes sudo or /etc/sudoers.d/.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-kit-files-unsafe]
+stage: BUILD
+failed: The kit's files failed the build check: {problems}.
+means: A hook, kit file or registration that is missing, or that the agent could replace, screens nothing, so the build stops.
+fix: Make the hook commands in `.ddev/claude/managed-settings.json` and the COPY lines in `.ddev/claude/Dockerfile.base` match the kit's copies.
+fix: Remove any step in `.ddev/claude.local/Dockerfile.fragment` that writes under /usr/local/lib/agent-container-kit/, /usr/local/bin/ or /etc/agent-container-kit/.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+# ---- Image build: the host user's ids ---------------------------------------
+
+[build-host-ids-invalid]
+stage: BUILD
+failed: The build argument {name} is `{value}`, which is not a user or group id above 0 written in digits with no leading zero.
+means: The sidecar's user takes the host user's ids from DDEV so it can read and write the project, and never root's, so the build stops.
+fix: Check that `.ddev/docker-compose.zz-claude-overlay.yaml` passes `DDEV_UID` and `DDEV_GID` under the claude service's `build: args:`, as the kit's copy does.
+fix: Run `ddev restart --no-cache` from an ordinary host account, not root, since DDEV passes that account's ids.
+
+[build-host-ids-remap-failed]
+stage: BUILD
+failed: `{command}` exited with status {status} while giving the sidecar's user the host user's ids.
+means: The build stops rather than produce a sidecar whose user may be unable to read or write the project.
+fix: Read the lines above this block for the command's own error.
+fix: Remove any step in `.ddev/claude.local/Dockerfile.fragment` that changes the claude user or group, then run `ddev claude rebuild` and `ddev restart --no-cache`.
+
+# ---- Image build: the Claude Code check ------------------------------------
+
+[build-claude-unidentified]
+stage: BUILD
+failed: The build could not identify the installed Claude Code: `claude` on PATH is {binary}, which reports version `{version}`.
+means: The build checks the program against Anthropic's signed release manifest for its version, so it stops without one.
+fix: Read the installer's output above this block for its own error.
+fix: Remove any step in `.ddev/claude.local/Dockerfile.fragment` that installs or removes a `claude` program, then run `ddev claude rebuild` and `ddev restart`.
+
+[build-claude-download-failed]
+stage: BUILD
+failed: {url} could not be downloaded, or arrived empty.
+means: The build checks the installed Claude Code against this file, so it stops here.
+fix: Check that the host is online and that `curl -fsSLI {url}` succeeds.
+fix: Run `ddev claude rebuild`, then `ddev restart`.
+
+[build-claude-release-key-mismatch]
+stage: BUILD
+failed: The release signing key from {url} is not the pinned key alone; its primary keys: {primaries}.
+means: The build verifies the release manifest only against the pinned key, so it stops before checking the program.
+fix: Print its keys with `curl -fsSL {url} | gpg --show-keys`.
+fix: If it holds one key and Anthropic's Claude Code setup docs publish that fingerprint, put it in place of the pin in `.ddev/claude/Dockerfile.base`, then run `ddev claude rebuild` and `ddev restart`.
+
+[build-claude-signature-bad]
+stage: BUILD
+failed: The release manifest for Claude Code {version} does not carry a good signature from the pinned release key.
+means: The manifest or its signature is not what Anthropic signed, so the build uses none of its checksums and stops.
+fix: Read gpg's lines above this block; they name the key that made the signature and why it failed.
+fix: Run `ddev claude rebuild`, then `ddev restart`, which downloads the manifest and its signature again.
+
+[build-claude-platform-missing]
+stage: BUILD
+failed: The signed release manifest for Claude Code {version} lists no checksum under `platforms.{platform}`; this machine reports `{machine}`.
+means: The build names the platform from the machine type, and cannot check the program without that platform's checksum.
+fix: Print the platform names the manifest lists: `curl -fsSL {url}`.
+fix: If one is this machine's Linux build, map `{machine}` to it in the platform `case` of `.ddev/claude/Dockerfile.base`, then run `ddev claude rebuild` and `ddev restart`.
+
+[build-claude-checksum-mismatch]
+stage: BUILD
+failed: The installed Claude Code {version} at {binary} has SHA256 {actual}; the signed manifest lists {expected} for {platform}.
+means: The program is not the build Anthropic published for this platform, so the build stops before the image uses it.
+fix: Remove any step in `.ddev/claude.local/Dockerfile.fragment` that installs a `claude` program or writes under /home/claude/.local/.
+fix: Run `ddev claude rebuild`, then `ddev restart`, which installs Claude Code again.
+
+# ---- Guard hooks: a tool call stopped or held for approval in a session ----
+#
+# guardrail-protect.sh and git-screen.sh give these as the reason for a deny,
+# which the agent reads, or an ask, which the user answers. A deny's fix lines
+# are the routes that apply, and its last says what to do when none does.
+
+[guard-write-credentials]
+stage: GUARD
+failed: This writes `{path}`, a credentials file.
+means: Credentials are kept out of the sidecar, so the guard blocks any write to one.
+fix: Stop and tell the user, or your orchestrator if you are a subagent, what change you need; the user makes it on the host. Do not rephrase, split, or script the change to get past this check.
+
+[guard-write-dumps]
+stage: GUARD
+failed: This writes `{path}`, a database dump path.
+means: Dumps may hold real records and are handled on the host, so the guard blocks writes to them.
+fix: For data, use drush against the sanitized database.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the change to get past this check. Either way, report this denial to them.
+
+[guard-write-login]
+stage: GUARD
+failed: This writes `{path}`, the agent's login file.
+means: It holds this sidecar's Claude Code sign-in, so no agent may change it.
+fix: If sign-in is broken, tell the user, who signs in again.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the change to get past this check. Either way, report this denial to them.
+
+[guard-write-mcp]
+stage: GUARD
+failed: This writes `{path}`, an MCP server list.
+means: The sidecar runs only the MCP servers in the list baked into its image, so an edit here changes nothing.
+fix: Write out the server entry and walk the user through adding a server: the entry in .mcp.json, and the allowedMcpServers and enabledMcpjsonServers lists in .ddev/claude/managed-settings.json, edited on the host, then `ddev claude rebuild` and a restart.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the change to get past this check. Either way, report this denial to them.
+
+[guard-write-ddev]
+stage: GUARD
+failed: This writes `{path}`, in the DDEV folder.
+means: DDEV runs the files there on the host and builds images from them as root, so the folder is read-only in the sidecar.
+fix: Write out the change for the user to apply on the host. A change to a file the image is built from takes effect after `ddev claude rebuild` and a restart.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the change to get past this check. Either way, report this denial to them.
+
+[guard-write-git]
+stage: GUARD
+failed: This writes `{path}`, in a repository's git internals.
+means: Git on the host reads and runs a repository's history, config and hooks, so they are read-only in the sidecar.
+fix: Describe the change; the user runs git on the host.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the change to get past this check. Either way, report this denial to them.
+
+[guard-write-commit-hooks]
+stage: GUARD
+failed: This writes `{path}`, in a commit hooks folder.
+means: The host runs these files as git hooks when a project points git at them, so the sidecar may not change them.
+fix: Write out the change for the user to apply on the host.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the change to get past this check. Either way, report this denial to them.
+
+[guard-write-settings]
+asks: An agent's edit to `{path}`, Claude Code settings or a hook, needs your approval.
+means: It sets what agents may do in any Claude Code session that loads it, so approving lets this edit change what agents are allowed to do.
+fix: Approve only if you asked for a settings or hook change; otherwise decline.
+
+[guard-write-controls]
+asks: An agent's edit to `{path}`, part of this session's Claude Code controls, needs your approval.
+means: It is part of the settings, instructions, skills, memory and agents that steer agents in this sidecar, so approving lets this edit change how agents here behave.
+fix: Approve only if you asked for a change to agent controls or instructions; otherwise decline.
+
+[guard-write-instructions]
+asks: An agent's edit to `{path}`, instructions for Claude Code, needs your approval.
+means: Future sessions read it as instructions, so approving lets this edit change how agents here behave.
+fix: Approve only if you asked for a change to agent instructions; otherwise decline.
+
+[guard-write-ci]
+asks: An agent's edit to `{path}`, CI configuration, needs your approval.
+means: It defines workflows that run in CI, outside the sandbox, so approving lets this edit change what runs in CI.
+fix: Approve only if you asked for a CI change; otherwise decline.
+
+[guard-write-package-installs]
+asks: An agent's edit to `{path}`, package install settings, needs your approval.
+means: It steers package installs outside the sandbox, including the registry they fetch from and the code they run, so approving lets this edit change what an install fetches or runs.
+fix: Approve only if you asked for an install settings change; otherwise decline.
+
+[guard-bash-credentials]
+stage: GUARD
+failed: This command names a credentials file: .env, an SSH key, cloud credentials, or the agent's login file.
+means: Credentials are kept out of the sidecar, so the guard blocks any command that names one, even a read.
+fix: Stop and tell the user, or your orchestrator if you are a subagent, what you needed from it; the user runs that step on the host. Do not rephrase, split, or script the command to get past this check.
+
+[guard-bash-mcp]
+stage: GUARD
+failed: This command {hit}, a protected path (an MCP server list), and is not a read the guard recognizes.
+means: The sidecar runs only the MCP servers in the list baked into its image, so an edit there changes nothing; Bash may only read protected paths.
+fix: To add a server, write out its entry and walk the user through adding it: the entry in .mcp.json, and the allowedMcpServers and enabledMcpjsonServers lists in .ddev/claude/managed-settings.json, edited on the host, then `ddev claude rebuild` and a restart.
+fix: To copy a file out, run `{helper} --label <label> <file>...`, or `git show <rev>:<file> | {helper} --label <label> --stdin <filename>`; to delete or move one, ask the user to do it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-bash-ddev]
+stage: GUARD
+failed: This command {hit}, a protected path (the DDEV folder), and is not a read the guard recognizes.
+means: DDEV runs the files there on the host and builds images from them as root, so the folder is read-only in the sidecar; Bash may only read protected paths.
+fix: To change a file there, write out the change for the user to apply on the host. A change to a file the image is built from takes effect after `ddev claude rebuild` and a restart.
+fix: To copy a file out, run `{helper} --label <label> <file>...`, or `git show <rev>:<file> | {helper} --label <label> --stdin <filename>`; to delete or move one, ask the user to do it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-bash-git]
+stage: GUARD
+failed: This command {hit}, a protected path (git internals), and is not a read the guard recognizes.
+means: Git on the host reads and runs a repository's history, config and hooks, so they are read-only in the sidecar; Bash may only read protected paths.
+fix: To change them, describe the change; the user runs git on the host.
+fix: To copy a file out, run `{helper} --label <label> <file>...`, or `git show <rev>:<file> | {helper} --label <label> --stdin <filename>`; to delete or move one, ask the user to do it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-bash-commit-hooks]
+stage: GUARD
+failed: This command {hit}, a protected path (a commit hooks folder), and is not a read the guard recognizes.
+means: The host runs these files as git hooks when a project points git at them, so the sidecar may not change them; Bash may only read protected paths.
+fix: To change one, write out the change for the user to apply on the host.
+fix: To copy a file out, run `{helper} --label <label> <file>...`, or `git show <rev>:<file> | {helper} --label <label> --stdin <filename>`; to delete or move one, ask the user to do it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-bash-approval-path]
+stage: GUARD
+failed: This command {hit}, a protected path that only the Edit and Write tools may change, and is not a read the guard recognizes.
+means: The guard cannot determine what a command writes, so Bash may only read protected paths; the Edit and Write tools prompt the user to approve wherever a change there needs approval.
+fix: To change it, use the Edit or Write tool.
+fix: To copy a file out, run `{helper} --label <label> <file>...`, or `git show <rev>:<file> | {helper} --label <label> --stdin <filename>`; to delete or move one, ask the user to do it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-bash-dumps]
+asks: An agent's command names a database dump file or folder, and needs your approval.
+means: Dumps may hold unsanitized records, so even reading one needs your approval.
+fix: Approve only if you know what the command does with the dump; otherwise decline.
+
+[guard-bash-recursive-delete]
+asks: An agent's command looks like a recursive or forced delete in a spelling the permission rules do not catch, and needs your approval.
+means: The permission rules ask before a recursive delete only when the command leads with the recursive flag.
+fix: Approve only if you know what the command deletes; otherwise decline.
+
+[guard-git-write]
+stage: GUARD
+failed: `{command}` runs git {verb}, which is not a read verb.
+means: Git is read-only in the sidecar, and git writes run on the host.
+fix: To read, run git directly with a read verb ({verbs}) or a listing form of branch, tag, remote, stash, worktree, config or reflog.
+fix: To change the repository, describe the change; the user runs it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-git-write-form]
+stage: GUARD
+failed: `{command}` writes to the repository.
+means: Git is read-only in the sidecar, so of git {verb} only the forms that read pass; git writes run on the host.
+fix: To read, run git directly with a read verb ({verbs}) or a listing form of branch, tag, remote, stash, worktree, config or reflog.
+fix: To change the repository, describe the change; the user runs it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-git-config]
+stage: GUARD
+failed: `{command}` is a write form of git config.
+means: Git config can name programs that git on the host runs, so it is read-only in the sidecar.
+fix: To read it, use `git config --get`, `--get-all`, `--get-regexp` or `--list`.
+fix: To change it, describe the change; the user makes it on the host.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-git-new-repository]
+stage: GUARD
+failed: `{command}` creates or fetches a repository.
+means: Git is read-only in the sidecar, and a repository made here would sit outside the read-only git mount; git writes run on the host.
+fix: To bring in a repository, ask the user to clone or update it on the host.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-git-shell-text]
+stage: GUARD
+failed: `{program}` runs program text that names git, which the screen cannot classify.
+means: The git screen passes git only as a command of its own whose verb it can read; git writes run on the host.
+fix: Run git directly as its own command, with a read verb ({verbs}) or a listing form of branch, tag, remote, stash, worktree, config or reflog.
+fix: If that does not fit, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.
+
+[guard-git-unclassified]
+stage: GUARD
+failed: `{segment}` names git where the screen cannot classify it: in a substitution, a quoted string, or an argument.
+means: The git screen passes git only as a command of its own whose verb it can read; git writes run on the host.
+fix: Run git directly as its own command, with a read verb ({verbs}) or a listing form of branch, tag, remote, stash, worktree, config or reflog.
+fix: To read text that names git, use the Read tool, or a read-only program such as grep or cat run directly, in a command with no substitution, here-document, or pipe into a shell.
+fix: If none of these fits, stop and tell the user, or your orchestrator if you are a subagent, what you were trying to do, without rephrasing, splitting, or scripting the command to get past this check. Either way, report this denial to them.

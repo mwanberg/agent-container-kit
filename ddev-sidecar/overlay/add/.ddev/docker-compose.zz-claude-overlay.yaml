@@ -1,0 +1,185 @@
+# ---------------------------------------------------------------------------
+# Hardening override for the ddev-claude sidecar.
+#
+# DDEV merges every .ddev/docker-compose.*.yaml into the project's compose
+# configuration. The overrides below hold only if this file is merged after
+# the add-on's docker-compose.claude.yaml; the zz- prefix sorts it after that
+# file by name.
+#
+# Compose merges the volumes list by target path and the environment block by
+# key, so entries here replace the add-on's matching entries, and new targets
+# are added.
+#
+# `ddev utility compose-config` prints the merged result, which shows whether
+# the overrides took. In it:
+#   - /home/claude/.claude and /home/claude/.bash_history.d are named volumes
+#   - /var/www/html/.ddev and /var/www/html/.git are read-only
+#   - the credential variables are empty
+#   - mem_limit and pids_limit are set
+#   - the entrypoint runs init-firewall.sh before sleep
+# ---------------------------------------------------------------------------
+
+volumes:
+  claude-config:
+    name: ddev-${DDEV_SITENAME}-claude-config
+  claude-history:
+    name: ddev-${DDEV_SITENAME}-claude-history
+
+networks:
+  # A network shared by the sidecar and, through
+  # docker-compose.zz-claude-db.yaml, the database. It isolates nothing; see
+  # the network list on the claude service.
+  claude-isolated:
+    name: ddev-${DDEV_SITENAME}-claude-isolated
+
+services:
+  # Only the claude service is named here, so this file loads on projects
+  # without a database; the database's join is in its own file.
+  claude:
+    # CLAUDE_SIDECAR_SERVICES: the DDEV services the sidecar may reach, space
+    # separated. A build argument, which the image bakes into a root-owned
+    # file, because the firewall takes no setting from the environment. A
+    # change takes effect at the next rebuild, not at a restart.
+    #
+    # The firewall stops with an error, and the sidecar does not start, if `web`
+    # is listed. A Drupal site with
+    # Redis as its cache backend needs `redis` here, or drush cannot
+    # bootstrap. `db` is reachable only with docker-compose.zz-claude-db.yaml
+    # installed.
+    #
+    # DDEV_UID and DDEV_GID carry the host user's ids, which DDEV sets, into
+    # the build, where the image gives them to the claude user so it can read
+    # and write the project. A host id change takes effect at the next rebuild.
+    build:
+      args:
+        CLAUDE_SIDECAR_SERVICES: "db"
+        DDEV_UID: ${DDEV_UID}
+        DDEV_GID: ${DDEV_GID}
+
+    # Network list. `!override` replaces the service's list instead of merging
+    # into it, but DDEV still attaches the project network and its global
+    # network afterwards: `docker inspect` on a running sidecar lists all
+    # three, so the sidecar shares the project network with web and db alike.
+    #
+    # claude-isolated, and docker-compose.zz-claude-db.yaml which puts db on
+    # it, date from before that was observed. Whether db stays reachable
+    # through the project network alone, without them, is not established.
+    #
+    # Web is kept out by the firewall, by destination: it allows only the
+    # addresses of the services in CLAUDE_SIDECAR_SERVICES, rejects the rest of
+    # the local range, and stops with an error if web is listed or a connection
+    # to web succeeds. The LIMITS in init-firewall.sh's header say what that
+    # leaves open.
+    #
+    # The sidecar cannot make HTTP requests to the site web serves. Drush,
+    # unit and kernel tests talk to the database and are unaffected.
+    # Functional and browser tests, and any check of rendered pages, need the
+    # site served inside the sidecar on loopback, which the build fragment's
+    # optional Drupal test and rendered-site blocks set up, or run on the host.
+    networks: !override
+      - claude-isolated
+
+    # Overrides the add-on's `user: root`, which its own entrypoint needs. This
+    # image takes the host's ids at build time and its entrypoint reaches root
+    # only through the sudo grant for the firewall script, so the container
+    # runs as claude. That is also the default user of `docker exec` and of
+    # any launcher call that omits `--user`; as root, a planted binary on the
+    # agent's PATH would run as root.
+    user: claude
+
+    volumes:
+      # Claude Code's sign-in and settings, and bash history, on named
+      # volumes. The history entry replaces the add-on's bind mount of
+      # .ddev/.claude/bash_history.d, which would leave the sidecar a writable
+      # folder inside .ddev.
+      #
+      # The project tree is still writable, so .claude/settings.local.json,
+      # .mcp.json and CLAUDE.md remain reachable; the managed settings in the
+      # image are what stop user, project and plugin hooks and MCP servers
+      # from loading.
+      - claude-config:/home/claude/.claude
+      - claude-history:/home/claude/.bash_history.d
+
+      # Read-only remounts of .ddev and .git inside the read-write project mount.
+      # DDEV runs exec-host hooks from .ddev/config.*.yaml and
+      # .ddev/commands/host/* on the host, and builds images from files under
+      # .ddev as root. Git runs .git/hooks on the host at the next commit, and
+      # git status never shows them.
+      #
+      # Web still mounts .ddev read-write; see the optional web block at the
+      # end.
+      #
+      # On a project with no .git, remove the .git line: Docker would create an
+      # empty .git folder in the project. A .git file (a worktree or submodule
+      # checkout) is mounted read-only as it is.
+      - ../.ddev:/var/www/html/.ddev:ro
+      - ../.git:/var/www/html/.git:ro
+
+    environment:
+      # The add-on fills these from the host shell's environment, which passes
+      # through whatever it exports, such as a GitHub token exported for other
+      # work. Empty values keep them out; sign-in is OAuth only.
+      - ANTHROPIC_API_KEY=
+      - GITHUB_PERSONAL_ACCESS_TOKEN=
+      - GH_TOKEN=
+      # Telemetry, error reporting and the bug command off, by their own flags
+      # rather than CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, which also turns
+      # off the auto-updater.
+      - DISABLE_TELEMETRY=1
+      - DISABLE_ERROR_REPORTING=1
+      - DISABLE_BUG_COMMAND=1
+
+      # The site's settings file includes the DDEV-generated one that holds
+      # the database settings (settings.ddev.php on Drupal) only when this is
+      # true, as DDEV sets it in the web container. Without it drush cannot
+      # connect to the database.
+      - IS_DDEV_PROJECT=true
+
+      # The add-on points this at the web container, which the firewall keeps
+      # unreachable from the sidecar.
+      - PLAYWRIGHT_BASE_URL=
+
+    # Docker Desktop provides host.docker.internal; Linux does not, and the
+    # firewall's MCP proxy rule needs it to resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # A runaway build or a fork bomb in the sidecar cannot exhaust the Docker
+    # host.
+    mem_limit: 6g
+    pids_limit: 512
+
+    # A real init at PID 1 reaps orphaned processes, which would otherwise
+    # pile up as zombies against pids_limit under `sleep infinity`.
+    init: true
+
+    # The firewall runs at container start, so the container is never up
+    # without it. It exits non-zero when a check of its rules fails, and the
+    # container then does not start.
+    #
+    # `bash -c`, not `bash -lc`: a login shell sources ~/.profile, which the
+    # agent can write, and a profile that put a fake `sudo` first on PATH
+    # would skip the firewall and still reach sleep. `docker restart` keeps
+    # the container's writable layer, so such a plant would survive it.
+    # `bash -c` reads no startup file except $BASH_ENV, which only the image
+    # and this file set.
+    #
+    # sudo by absolute path, because the agent-writable CLI folder is on PATH
+    # and a planted `sudo` that returns success would bring the container up
+    # with no firewall. Dockerfile.base also puts that folder last on PATH.
+    entrypoint: ["/bin/bash", "-c", "/usr/bin/sudo /usr/local/bin/init-firewall.sh && exec sleep infinity"]
+
+  # ---------------------------------------------------------------------------
+  # Optional, off: a read-only remount of .ddev in the web service.
+  #
+  # Web mounts the project root read-write, so a file the agent planted can
+  # write .ddev when it runs in web. Remounting .ddev read-only there closes
+  # that. It is off because DDEV's web entrypoint writes configuration at
+  # startup; it uses /mnt/ddev_config, which stays writable, but whether
+  # anything also writes /var/www/html/.ddev is not established, and a project
+  # whose web container cannot start with it needs it removed.
+  #
+  #   web:
+  #     volumes:
+  #       - ../.ddev:/var/www/html/.ddev:ro
+  # ---------------------------------------------------------------------------

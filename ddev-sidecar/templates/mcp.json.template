@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "context7": {
+      "type": "http",
+      "url": "http://host.docker.internal:8788/context7/mcp",
+      "headers": { "Authorization": "Bearer placeholder" }
+    }
+  }
+}

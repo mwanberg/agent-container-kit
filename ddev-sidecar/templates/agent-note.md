@@ -1,0 +1,1 @@
+When Claude Code runs in this project's DDEV sidecar (`ddev claude`), its network is limited to an allowlist, `.ddev` and `.git` are read-only, and the user makes every change to the sidecar on the host. For what the sidecar allows and how to change it, use the `ddev-sidecar` skill and the README beside it in `.claude/skills/ddev-sidecar/`.

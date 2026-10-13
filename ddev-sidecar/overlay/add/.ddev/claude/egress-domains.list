@@ -1,0 +1,35 @@
+# Every domain the sidecar may reach over the network, and the only list the
+# firewall reads. One domain per line; `#` starts a comment.
+#
+# The image build copies this file to a root-owned, read-only path, and the
+# firewall reads only that copy. A change here takes effect when the image is
+# next built.
+#
+# Every entry is egress surface. The firewall allows destination addresses, and
+# domains behind shared CDN edges serve many unrelated sites, so each entry is a
+# potential exfiltration destination through SNI fronting. An entry also allows
+# every subdomain under it, so a specific host is narrower than an apex.
+#
+# No PHP or Drupal toolchain domains: dependency installs run on the host, so
+# packagist.org, repo.packagist.org, drupal.org, git.drupalcode.org and
+# api.github.com are absent, and the managed policy denies the mutating
+# composer subcommands with a reason rather than a network timeout.
+#
+# Absent because it is a broad CDN: objects.githubusercontent.com (GitHub
+# release-asset downloads).
+
+# Claude Code. claude.ai is an apex because sign-in and the installer use
+# several of its subdomains, all run by Anthropic.
+api.anthropic.com
+claude.ai
+# OAuth authorize and callback. A separate registrable domain, so the claude.ai
+# apex does not cover it, and sign-in fails without it.
+platform.claude.com
+# Covered by the claude.ai apex; listed so its addresses are allowed from the
+# first resolution, before a lookup has added them.
+downloads.claude.ai
+
+# Plugin marketplace clones over anonymous HTTPS; an apex because the clones use
+# several of its subdomains, all run by GitHub. No credentials exist in the
+# sidecar. Only plugin installs and updates from inside the sidecar use it.
+github.com

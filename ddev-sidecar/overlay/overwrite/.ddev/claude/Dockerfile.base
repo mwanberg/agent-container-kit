@@ -1,0 +1,344 @@
+# ---------------------------------------------------------------------------
+# Per-project sidecar Dockerfile template; replaces the add-on's.
+# build-image.sh turns it into .ddev/claude/Dockerfile.
+#
+# DDEV's generated-file marker is left out, so add-on updates leave this file
+# alone and upstream changes to it need a manual diff.
+#
+# The base image is pinned by digest: a tag can be repointed at a different
+# image without its name changing.
+#
+# The guardrail layers come after the extras injection point. Extras and the
+# project's .ddev/claude.local/Dockerfile.fragment are spliced in there and run
+# as root, and a later layer overwrites an earlier one, so nothing a fragment
+# writes survives over the guardrails.
+#
+# Claude Code is installed and checked below rather than taken from the base
+# image, which holds the release current when its maintainer built it.
+# ---------------------------------------------------------------------------
+
+# The add-on's ddev-claude-base:v0.4.2 tag, resolved to its multi-platform
+# index digest (amd64 and arm64).
+FROM ghcr.io/makraz/ddev-claude-base@sha256:55aed61f888ade4457ab5f81196ecdc3ab7dab53fd881230fdb9c12882364fec
+
+USER root
+
+# The fix-it helper and its messages, which explain every build and firewall
+# stop, and the key-check helper for pinned signing keys. Copied here so the
+# fragments spliced below can use them, and again in the guardrail layers, so
+# the Claude Code check and the firewall run the kit's copies whatever a
+# fragment wrote.
+COPY fix-it.sh fix-it-messages.txt key-check.sh /usr/local/lib/agent-container-kit/
+RUN chmod 0555 /usr/local/lib/agent-container-kit/fix-it.sh /usr/local/lib/agent-container-kit/key-check.sh \
+ && chmod 0444 /usr/local/lib/agent-container-kit/fix-it-messages.txt
+
+# ---- EXTRAS INJECTION POINT ----
+# build-image.sh replaces the literal marker line below with the concatenated
+# contents of every selected claude/extras/<name>.fragment, followed by
+# .ddev/claude.local/Dockerfile.fragment if it exists. Fragments run as root;
+# one that switches USER restores USER root before its end, since the layers
+# after it install as root.
+# {{EXTRAS}}
+# --------------------------------
+
+# ---- Guardrail layers: last, so no spliced fragment can overwrite them ----
+#
+# Each layer that bakes a root-run or policy file also sets its folder
+# root-owned and 0755. COPY into an existing folder keeps that folder's owner
+# and mode, so a folder a fragment created or loosened would otherwise let the
+# agent replace the root-owned file in it.
+
+USER root
+
+# jq: the guardrail hooks and the status line read their input with it, and
+# without it the hooks prompt the user to approve every tool call. python3 runs
+# hook-health.py. gnupg checks the Claude Code release key and manifest below.
+# The base image has none of them.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends jq python3 gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+# The helpers and messages again, over anything a fragment left at the same
+# paths.
+COPY fix-it.sh fix-it-messages.txt key-check.sh /usr/local/lib/agent-container-kit/
+RUN chown root:root /usr/local/lib/agent-container-kit /usr/local/lib/agent-container-kit/fix-it.sh /usr/local/lib/agent-container-kit/fix-it-messages.txt /usr/local/lib/agent-container-kit/key-check.sh \
+ && chmod 0755 /usr/local/lib/agent-container-kit \
+ && chmod 0555 /usr/local/lib/agent-container-kit/fix-it.sh /usr/local/lib/agent-container-kit/key-check.sh \
+ && chmod 0444 /usr/local/lib/agent-container-kit/fix-it-messages.txt
+
+# Hardened firewall, replacing the add-on's copy. The sidecar user's single
+# sudo permission points at this path.
+COPY init-firewall.sh /usr/local/bin/init-firewall.sh
+RUN chown root:root /usr/local/bin /usr/local/bin/init-firewall.sh \
+ && chmod 0755 /usr/local/bin /usr/local/bin/init-firewall.sh
+
+# Root-owned firewall configuration, in a folder of its own. The firewall takes
+# its settings only from these files and rejects them unless they are
+# root-owned (init-firewall.sh's header says why), so what the sidecar may
+# reach is fixed at build time.
+#
+# CLAUDE_SIDECAR_SERVICES, set in docker-compose.zz-claude-overlay.yaml, is the
+# space-separated list of DDEV services the sidecar may reach.
+#
+# egress-domains.list, beside this file, is the whole domain allowlist. Copied
+# after the extras injection point, so the image holds the project's file
+# whatever a fragment wrote to the same path.
+ARG CLAUDE_SIDECAR_SERVICES=db
+COPY egress-domains.list /etc/agent-container-kit/firewall/egress-domains.list
+RUN printf '%s\n' "${CLAUDE_SIDECAR_SERVICES}" > /etc/agent-container-kit/firewall/services.list \
+ && chown root:root /etc/agent-container-kit /etc/agent-container-kit/firewall /etc/agent-container-kit/firewall/egress-domains.list /etc/agent-container-kit/firewall/services.list \
+ && chmod 0755 /etc/agent-container-kit /etc/agent-container-kit/firewall \
+ && chmod 0444 /etc/agent-container-kit/firewall/egress-domains.list \
+ && chmod 0644 /etc/agent-container-kit/firewall/services.list
+
+# Managed policy. Sits above user and project settings and cannot be overridden
+# from either, which matters because the sidecar's config directory is the
+# agent's own home.
+COPY managed-settings.json /etc/claude-code/managed-settings.json
+RUN chown root:root /etc/claude-code /etc/claude-code/managed-settings.json \
+ && chmod 0755 /etc/claude-code \
+ && chmod 0444 /etc/claude-code/managed-settings.json
+
+# Guardrail hooks, outside both the config directory and the project tree.
+COPY hooks/guardrail-protect.sh /usr/local/lib/agent-container-kit/guardrail-protect.sh
+RUN chown root:root /usr/local/lib/agent-container-kit/guardrail-protect.sh \
+ && chmod 0555 /usr/local/lib/agent-container-kit/guardrail-protect.sh
+COPY hooks/git-screen.sh /usr/local/lib/agent-container-kit/git-screen.sh
+RUN chown root:root /usr/local/lib/agent-container-kit/git-screen.sh \
+ && chmod 0555 /usr/local/lib/agent-container-kit/git-screen.sh
+# Both hooks source this from beside themselves.
+COPY hooks/guard-lib.sh /usr/local/lib/agent-container-kit/guard-lib.sh
+RUN chown root:root /usr/local/lib/agent-container-kit/guard-lib.sh \
+ && chmod 0444 /usr/local/lib/agent-container-kit/guard-lib.sh
+
+# The status line command. It runs outside the permission system, so it is
+# baked where the agent cannot write, like every command the policy registers.
+COPY statusline-command.sh /usr/local/lib/agent-container-kit/statusline-command.sh
+RUN chown root:root /usr/local/lib/agent-container-kit/statusline-command.sh \
+ && chmod 0555 /usr/local/lib/agent-container-kit/statusline-command.sh
+
+# The copy helper: the guard hook lets agents run it on protected files by this
+# exact path, so it has to be a copy the agent cannot replace.
+COPY scratch-copy.sh /usr/local/bin/scratch-copy
+RUN chown root:root /usr/local/bin/scratch-copy \
+ && chmod 0555 /usr/local/bin/scratch-copy
+
+# Hook case run, beside the hooks it defaults to: the agent can run it from
+# here, since the guard hook blocks it from running the copy under .ddev/claude.
+COPY hook-health.py /usr/local/lib/agent-container-kit/hook-health.py
+COPY hook-cases.json /usr/local/lib/agent-container-kit/hook-cases.json
+RUN chown root:root /usr/local/lib/agent-container-kit/hook-health.py /usr/local/lib/agent-container-kit/hook-cases.json \
+ && chmod 0555 /usr/local/lib/agent-container-kit/hook-health.py \
+ && chmod 0444 /usr/local/lib/agent-container-kit/hook-cases.json
+
+# The project mount can present an owner that git reports as dubious, which breaks
+# even read-only git. System config is baked into the image; a per-user
+# `git config --global` would sit on the writable layer and vanish at restart.
+RUN git config --system --add safe.directory /var/www/html
+
+# Bare `drush`, as Drupal documentation assumes. PATH leaves out the
+# agent-writable vendor/bin, where a planted binary could shadow system ones,
+# so a root-owned wrapper on the system PATH execs the project's drush, the
+# same target as an explicit vendor/bin/drush.
+RUN printf '#!/bin/sh\nexec /var/www/html/vendor/bin/drush "$@"\n' > /usr/local/bin/drush \
+ && chown root:root /usr/local/bin/drush \
+ && chmod 0755 /usr/local/bin/drush
+
+# PATH is assigned, not appended to: the base image sets
+#     ENV PATH="/home/claude/.local/bin:${PATH}"
+# and an append would leave that folder first.
+#
+# /home/claude/.local/bin holds the Claude Code install and is writable by the
+# agent, and a file planted there survives `docker restart`, which keeps the
+# container's writable layer. Ahead of /usr/bin, a fake sudo there would
+# return success to the entrypoint or the launcher and the firewall would
+# never run. Last on PATH, it still provides `claude`. Set before the Claude
+# Code install, so the install's check verifies the `claude` this PATH
+# resolves. The build checks below confirm sudo resolves to /usr/bin/sudo.
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/claude/.local/bin"
+
+# The claude user takes the host user's ids, which DDEV passes in as build
+# arguments, so it can read and write the bind-mounted project on a Linux host
+# whose user is not the image's uid. Done at build time so nothing runs as root
+# at container start; a changed host id needs a rebuild. The name stays
+# `claude`, which the sudoers grant is keyed on, and an id is never 0. An id
+# another account in the image already holds is not taken, since sharing it
+# would hand the agent that account's files; macOS hosts typically pass group
+# 20, which Debian already uses, so there only the uid changes. Placed before
+# the Claude Code install, so the files it creates in /home/claude get the
+# final ids. chown -R without -L or -H changes symlinks themselves, never their
+# targets.
+ARG DDEV_UID
+ARG DDEV_GID
+RUN set -eu; \
+    fix_it=/usr/local/lib/agent-container-kit/fix-it.sh; \
+    for arg in "DDEV_UID=${DDEV_UID:-}" "DDEV_GID=${DDEV_GID:-}"; do \
+      value="${arg#*=}"; \
+      case "$value" in \
+        ''|*[!0-9]*|0*) ;; \
+        *) continue ;; \
+      esac; \
+      "$fix_it" build-host-ids-invalid name="${arg%%=*}" value="$value" >&2; exit 1; \
+    done; \
+    changed=0; \
+    holder="$(getent group "$DDEV_GID" | cut -d: -f1)"; \
+    if [ -z "$holder" ]; then \
+      groupmod -g "$DDEV_GID" claude \
+        || { "$fix_it" build-host-ids-remap-failed command="groupmod -g $DDEV_GID claude" status="$?" >&2; exit 1; }; \
+      changed=1; \
+    elif [ "$holder" != claude ]; then \
+      echo "Group id $DDEV_GID belongs to $holder in the image; the claude group keeps id $(id -g claude)."; \
+    fi; \
+    holder="$(getent passwd "$DDEV_UID" | cut -d: -f1)"; \
+    if [ -z "$holder" ]; then \
+      usermod -u "$DDEV_UID" claude \
+        || { "$fix_it" build-host-ids-remap-failed command="usermod -u $DDEV_UID claude" status="$?" >&2; exit 1; }; \
+      changed=1; \
+    elif [ "$holder" != claude ]; then \
+      echo "User id $DDEV_UID belongs to $holder in the image; the claude user keeps id $(id -u claude)."; \
+    fi; \
+    if [ "$changed" = 1 ]; then \
+      chown -R claude:claude /home/claude \
+        || { "$fix_it" build-host-ids-remap-failed command="chown -R claude:claude /home/claude" status="$?" >&2; exit 1; }; \
+    fi; \
+    echo "The claude user has uid $(id -u claude) and gid $(id -g claude)."
+
+# Claude Code, installed at build time. CLAUDE_CODE_VERSION=stable makes
+# Anthropic's install.sh fetch the stable release current when this layer is
+# built (it accepts `stable|latest|VERSION`). Docker reuses this layer from
+# its build cache while this RUN, the build arguments declared above it and
+# every earlier layer are unchanged, so a routine rebuild keeps the installed
+# release; `ddev restart --no-cache` fetches the current one. An in-session
+# update lives in the container's writable layer: `docker restart` keeps it,
+# and `ddev stop`, which removes the container, returns the next start to the
+# version this layer holds. The build runs with the Docker builder's network,
+# outside the sidecar firewall.
+#
+# The check follows Anthropic's documented manual verification. The release
+# signing key, pinned by the fingerprint the setup docs publish, must be the
+# only primary key in its file and must make a good signature on the release's
+# manifest.json; the SHA256 of the program PATH resolves must then equal the
+# manifest's `platforms.<platform>.checksum`. The release is the version that
+# program reports, and the platform names are the Linux build names the docs
+# list. Install and check share one RUN, so a failed check leaves no cached
+# install and the next build installs afresh.
+ARG CLAUDE_CODE_VERSION=stable
+USER claude
+WORKDIR /home/claude
+RUN set -eu; \
+    curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"; \
+    fix_it=/usr/local/lib/agent-container-kit/fix-it.sh; \
+    key_url=https://downloads.claude.ai/keys/claude-code.asc; \
+    binary="$(command -v claude || true)"; \
+    [ -z "$binary" ] || binary="$(readlink -f "$binary")"; \
+    version="$([ -z "$binary" ] || "$binary" --version | awk 'NR == 1 { print $1 }')"; \
+    printf '%s\n' "$version" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' \
+      || { "$fix_it" build-claude-unidentified binary="${binary:-none}" version="$version" >&2; exit 1; }; \
+    release="https://downloads.claude.ai/claude-code-releases/$version"; \
+    machine="$(uname -m)"; \
+    case "$machine" in \
+      x86_64) platform=linux-x64 ;; \
+      aarch64) platform=linux-arm64 ;; \
+      *) platform=none ;; \
+    esac; \
+    work="$(mktemp -d)"; \
+    export GNUPGHOME="$work/gnupg"; \
+    mkdir -m 0700 "$GNUPGHOME"; \
+    for url in "$key_url" "$release/manifest.json" "$release/manifest.json.sig"; do \
+      if ! curl -fsSL "$url" -o "$work/${url##*/}" || [ ! -s "$work/${url##*/}" ]; then \
+        "$fix_it" build-claude-download-failed url="$url" >&2; exit 1; \
+      fi; \
+    done; \
+    /usr/local/lib/agent-container-kit/key-check.sh "$work/claude-code.asc" '31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE' build-claude-release-key-mismatch url="$key_url"; \
+    { gpg --batch --import "$work/claude-code.asc" && gpg --batch --verify "$work/manifest.json.sig" "$work/manifest.json"; } \
+      || { "$fix_it" build-claude-signature-bad version="$version" >&2; exit 1; }; \
+    expected="$(jq -r --arg p "$platform" '.platforms[$p].checksum // empty' "$work/manifest.json")" || expected=""; \
+    [ -n "$expected" ] \
+      || { "$fix_it" build-claude-platform-missing version="$version" platform="$platform" machine="$machine" url="$release/manifest.json" >&2; exit 1; }; \
+    actual="$(sha256sum "$binary" | awk '{ print $1 }')"; \
+    [ "$actual" = "$expected" ] \
+      || { "$fix_it" build-claude-checksum-mismatch version="$version" binary="$binary" actual="$actual" expected="$expected" platform="$platform" >&2; exit 1; }; \
+    rm -rf "$work"
+
+# The folders the named volumes mount over, created as claude so a fresh
+# volume takes their ownership. Docker copies an image path's contents and
+# ownership into a new volume; without the path, the volume is root-owned and
+# Claude Code cannot write its sign-in or settings.
+RUN mkdir -p /home/claude/.claude /home/claude/.bash_history.d
+
+# Build checks: properties the sidecar's protection depends on, which a new
+# base image or a fragment could change. Each failure stops the build with a
+# fix-it block.
+USER root
+RUN set -eu; \
+    fix_it=/usr/local/lib/agent-container-kit/fix-it.sh; \
+    # PATH resolves sudo to the real binary, not to anything in the
+    # agent-writable Claude Code folder.
+    sudo_path="$(command -v sudo || true)"; \
+    [ "$sudo_path" = /usr/bin/sudo ] \
+      || { "$fix_it" build-sudo-unsafe "check=sudo resolves to '$sudo_path', not /usr/bin/sudo" >&2; exit 1; }; \
+    # sudo -l resolves every sudoers file, group and alias. The Defaults that
+    # apply to the claude user print above its "may run" line, as settings
+    # separated by commas and spaces; its grants print below that line. The
+    # base image is third party, so a new digest can change its sudoers.
+    listing="$(sudo -l -U claude)" || listing=""; \
+    # The claude user's only sudo grant is the firewall script.
+    grants="$(printf '%s\n' "$listing" | awk 'listing && NF { sub(/^[ \t]+/, ""); out = out (out == "" ? "" : "; ") $0 } /^User claude may run the following commands/ { listing = 1 } END { print out }')"; \
+    [ "$grants" = '(root) NOPASSWD: /usr/local/bin/init-firewall.sh' ] \
+      || { "$fix_it" build-sudo-unsafe "check=the claude user's sudo grants are '${grants:-none}', not the firewall script alone" >&2; exit 1; }; \
+    # sudo runs that script with the caller's environment reset and with its
+    # own PATH, since the agent controls both. A Defaults setting that keeps
+    # or sets variables (env_keep, env_check, env_file, restricted_env_file,
+    # setenv), turns off env_reset or secure_path, or exempts a group from
+    # secure_path fails, and so does a missing secure_path.
+    defaults="$(printf '%s\n' "$listing" | awk '/^User claude may run the following commands/ { exit } { n = split($0, word, /[ \t,]+/); for (i = 1; i <= n; i++) { if (word[i] ~ /^secure_path=/) path = 1; if (word[i] ~ /^(!env_reset|!secure_path|setenv|(env_keep|env_check)\+?=.*|(env_file|restricted_env_file|exempt_group)=.*)$/) { gsub(/"/, "", word[i]); open = open (open == "" ? "" : " ") word[i] } } } END { if (open != "") out = "keep or set environment with " open; if (!path) out = out (out == "" ? "" : "; ") "set no secure_path"; print out }')"; \
+    [ -z "$defaults" ] \
+      || { "$fix_it" build-sudo-unsafe "check=the claude user's sudo Defaults $defaults" >&2; exit 1; }
+
+# Every absolute path a command registered in managed-settings.json names (the
+# hooks and the status line) exists and is owned by root, and neither it nor
+# its folder is group- or world-writable. The registration and the COPY lines
+# above are separate edits, and a registered command that is missing, or that
+# the agent can replace, screens nothing. A command naming no absolute path
+# cannot be checked, so it fails. Every problem goes into one fix-it block.
+RUN set -euf; \
+    settings=/etc/claude-code/managed-settings.json; \
+    fix_it=/usr/local/lib/agent-container-kit/fix-it.sh; \
+    commands="$(jq -r '((.hooks // {})[][].hooks[]?, .statusLine // empty) | select(.type == "command") | .command' "$settings")" \
+      || { "$fix_it" build-kit-files-unsafe "problems=jq could not read the registered commands in $settings" >&2; exit 1; }; \
+    printf '%s\n' "$commands" | { \
+      problems=""; \
+      note() { problems="${problems:+$problems; }$1"; }; \
+      check() { \
+        if [ ! -e "$1" ]; then \
+          note "$2 $1${3:-} does not exist"; return; \
+        fi; \
+        for path in "$1" "$(dirname "$(readlink -f "$1")")"; do \
+          owner=$(stat -L -c %U "$path"); mode=$(stat -L -c %a "$path"); \
+          [ "$owner" = root ] || note "$2 $path is owned by $owner, not root"; \
+          [ $((0$mode & 022)) -eq 0 ] || note "$2 $path is group- or world-writable (mode $mode)"; \
+        done; \
+      }; \
+      [ -n "$commands" ] || note "$settings registers no command"; \
+      while IFS= read -r command; do \
+        [ -n "$command" ] || continue; \
+        named=0; \
+        for word in $command; do \
+          case "$word" in /*) named=1; check "$word" "command path" ", registered in $settings," ;; esac; \
+        done; \
+        [ "$named" = 1 ] || note "command '$command' in $settings names no absolute path to check"; \
+      done; \
+      [ -z "$problems" ] || { "$fix_it" build-kit-files-unsafe "problems=$problems" >&2; exit 1; }; \
+    }
+
+# Build stamp. The launcher stops with an error on an image without it, and its time says how
+# old the baked layers are. A RUN layer's cache key is its command plus its
+# parent layer, and this command never varies, so it is the last
+# content-producing layer: rebuilt whenever any layer above it is, and only
+# then.
+RUN date -u +%FT%TZ > /etc/agent-container-kit/image-built-at \
+ && chown root:root /etc/agent-container-kit/image-built-at \
+ && chmod 0444 /etc/agent-container-kit/image-built-at
+
+USER claude
+WORKDIR /var/www/html

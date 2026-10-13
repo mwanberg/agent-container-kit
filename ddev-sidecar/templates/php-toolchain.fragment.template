@@ -1,0 +1,415 @@
+# ---------------------------------------------------------------------------
+# Per-project build fragment for the sidecar: a PHP and Node baseline matched
+# to the project, then OPTIONAL blocks for Drupal tests, rendered-page testing,
+# further accessibility checks, and linting. The installer writes
+# .ddev/claude.local/Dockerfile.fragment from this template, filling in the
+# ARG lines after this header; by hand, copy it there and fill them in. The
+# baseline builds on its own.
+#
+# The OPTIONAL blocks are commented out. To enable one, remove one leading `#`
+# (and the space after it) from each line, starting at its `## Needs:` line and
+# stopping before the next divider line of dashes, as an editor's
+# toggle-comment does. Its notes carry two hashes, so they stay comments, and
+# its instructions one, so they come live. Each block says what it needs from
+# the blocks before it.
+#
+# Per-project values, each set once on its ARG line after this header and
+# used by name everywhere below, so a change is one line:
+#
+#     PHP_VERSION         the web container's PHP major.minor, for example 8.3
+#     NODE_MAJOR          the Node major the theme's build expects, for example 22:
+#                         the theme's .nvmrc if it pins one, else the major of
+#                         nodejs_version in .ddev/config.yaml. The rendered-site
+#                         block, and the accessibility block built on it, need
+#                         20 or newer; their build stops on an older one.
+#
+# The lint block alone keeps a text placeholder, CORE-LINT-PACKAGES, derived as
+# that block shows, because its value is a quoted list.
+#
+# Each value is checked before it is used. Every check that stops the build
+# prints a fix-it block through /usr/local/lib/agent-container-kit/fix-it.sh,
+# and the repository keys are checked by key-check.sh beside it;
+# Dockerfile.base copies both in before splicing this fragment.
+#
+# PHP VERSION
+#
+# PHP_VERSION is the web container's PHP version, major and minor: the value of
+# php_version in .ddev/config.yaml. The add-on's `php` extra installs one fixed version instead, so
+# it stays off `extras` in .ddev/claude.yaml: both together put two PHP
+# versions in one image, with `update-alternatives` selecting which one runs.
+#
+# The sidecar and the web container share one bind mount, so they share
+# `vendor/`. Composer's autoloader includes
+# `vendor/composer/platform_check.php`, which stops any PHP process whose
+# version does not meet the installed packages' requirements, so drush and
+# phpunit fail in a sidecar running such a version. A version that passes the
+# check but differs from the web container's runs the code differently from
+# the site.
+#
+# The Sury repository publishes end-of-life PHP versions alongside current
+# ones, so an older version installs the same way. An end-of-life PHP here is
+# unpatched; it serves no traffic, accepts no inbound connections, and runs
+# behind the egress firewall, to run drush and tests against a local database.
+#
+# The Sury signing key is pinned by fingerprint. key-check.sh rejects the
+# downloaded keyring unless the pinned key is its only primary key, because apt
+# accepts every key in a signed-by keyring; the pinned key's own subkeys pass.
+# After a legitimate rotation, print the new key with:
+#
+#     curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --show-keys
+# ---------------------------------------------------------------------------
+USER root
+
+# The per-project values; the header says how to choose them.
+ARG PHP_VERSION=PHPVER
+ARG NODE_MAJOR=NODEMAJOR
+
+# Both checked by shape before apt or the NodeSource URL uses them.
+RUN case "${PHP_VERSION}" in \
+      [0-9].[0-9]|[0-9].[0-9][0-9]) ;; \
+      *) /usr/local/lib/agent-container-kit/fix-it.sh build-fragment-placeholder name="PHP_VERSION" value="${PHP_VERSION}" form="a PHP major.minor such as 8.3" where="on its ARG line after the header" >&2; exit 1 ;; \
+    esac \
+ && case "${NODE_MAJOR}" in \
+      ""|*[!0-9]*) /usr/local/lib/agent-container-kit/fix-it.sh build-fragment-placeholder name="NODE_MAJOR" value="${NODE_MAJOR}" form="a Node major version such as 22" where="on its ARG line after the header" >&2; exit 1 ;; \
+    esac
+
+# The Sury suite is the base image's Debian codename, read from /etc/os-release
+# so the PHP packages match the release the image runs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gnupg \
+      libzip-dev \
+      libicu-dev \
+      libxml2-dev \
+      libpng-dev \
+      libjpeg-dev \
+      libfreetype6-dev \
+      libonig-dev \
+      libxslt-dev \
+ && key_url=https://packages.sury.org/php/apt.gpg \
+ && if ! curl -fsSL "${key_url}" -o /tmp/sury-php.gpg || [ ! -s /tmp/sury-php.gpg ]; then \
+      /usr/local/lib/agent-container-kit/fix-it.sh build-repository-key-download-failed url="${key_url}" packages="PHP" >&2; exit 1; \
+    fi \
+ && /usr/local/lib/agent-container-kit/key-check.sh /tmp/sury-php.gpg '15058500A0235D97F5D10063B188E2B695BD4743' build-sury-key-mismatch \
+ && mkdir -p /etc/apt/keyrings \
+ && mv /tmp/sury-php.gpg /etc/apt/keyrings/sury-php.gpg \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/etc/apt/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${VERSION_CODENAME} main" \
+      > /etc/apt/sources.list.d/sury-php.list \
+ && apt-get update && apt-get install -y --no-install-recommends \
+      php${PHP_VERSION}-cli \
+      php${PHP_VERSION}-bcmath \
+      php${PHP_VERSION}-curl \
+      php${PHP_VERSION}-gd \
+      php${PHP_VERSION}-intl \
+      php${PHP_VERSION}-mbstring \
+      php${PHP_VERSION}-mysql \
+      php${PHP_VERSION}-soap \
+      php${PHP_VERSION}-xml \
+      php${PHP_VERSION}-xsl \
+      php${PHP_VERSION}-zip \
+      default-mysql-client \
+ && update-alternatives --set php "/usr/bin/php${PHP_VERSION}" \
+ && apt-get purge -y --auto-remove \
+      libzip-dev libicu-dev libxml2-dev libpng-dev libjpeg-dev \
+      libfreetype6-dev libonig-dev libxslt-dev gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+# Composer, for its read-only subcommands (show, why, validate), which work
+# from the lock file; the managed policy denies the ones that change
+# dependencies.
+#
+# Pinned by digest, because the composer:2 tag moves with every release. The
+# digest is the tag's multi-platform index, here Composer 2.10.3.
+COPY --from=composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac /usr/bin/composer /usr/local/bin/composer
+
+# The extension list above is Drupal core's baseline; tune it to the site. Add
+# php${PHP_VERSION}-pgsql for a Postgres site, and the extension any configured cache
+# backend loads: without it every Drupal bootstrap fails, drush included.
+# default-mysql-client provides the `mysql` binary that `drush sql:query` and
+# `drush sql:cli` shell out to. mysqldump stays denied by the managed policy.
+
+# Node, for the theme's build scripts and for the optional blocks below. It is
+# the runtime only: npm installs stay host-run, since the managed policy denies
+# them and the registry is outside the egress allowlist.
+#
+# NodeSource's apt repository, its signing key checked the way the Sury key is
+# above and used for this repository only. The apt preference makes apt install
+# NodeSource's nodejs even when Debian's has a higher version; Debian's comes
+# without npm. The check after the install stops the build when the image does
+# not have the chosen Node major version and npm.
+# The pinned fingerprint is that of the key deb.nodesource.com serves, and of
+# the key keyserver.ubuntu.com holds under nsolid-gpg@nodesource.com. After a
+# legitimate rotation, print the new key with:
+#
+#     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --show-keys
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gnupg \
+ && key_url=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+ && if ! curl -fsSL "${key_url}" -o /tmp/nodesource.asc || [ ! -s /tmp/nodesource.asc ]; then \
+      /usr/local/lib/agent-container-kit/fix-it.sh build-repository-key-download-failed url="${key_url}" packages="Node" >&2; exit 1; \
+    fi \
+ && /usr/local/lib/agent-container-kit/key-check.sh /tmp/nodesource.asc '6F71F525282841EEDAF851B42F59B5F99B1BE0B4' build-nodesource-key-mismatch \
+ && mkdir -p /etc/apt/keyrings \
+ && gpg --dearmor < /tmp/nodesource.asc > /etc/apt/keyrings/nodesource.gpg \
+ && rm /tmp/nodesource.asc \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/nodesource \
+ && apt-get update && apt-get install -y --no-install-recommends nodejs \
+ && apt-get purge -y --auto-remove gnupg \
+ && rm -rf /var/lib/apt/lists/* \
+ && found="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo none)" \
+ && if command -v npm >/dev/null 2>&1; then npm=present; else npm=missing; fi \
+ && if [ "${found}" != "${NODE_MAJOR}" ] || [ "${npm}" = missing ]; then \
+      /usr/local/lib/agent-container-kit/fix-it.sh build-node-not-installed wanted="${NODE_MAJOR}" found="${found}" npm="${npm}" >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: Drupal test stack, for Functional and FunctionalJavascript tests
+# run in the sidecar.
+## Prompt: Drupal browser tests: lets the agent run Drupal's Functional and FunctionalJavascript tests in the sidecar, with a browser in the image.
+## Question: Should the agent be able to run Drupal's browser tests?
+#
+## Needs: the PHP baseline above, the drush wrapper Dockerfile.base installs,
+## and phpunit.xml and vendor/bin/phpunit at the project root.
+##
+## The firewall keeps the web container unreachable from the sidecar, so the
+## site under test, the browser and its driver all run here, on loopback.
+## `drupal-fjs` starts chromedriver on 9515 and `drush runserver` on 8888 for
+## the run when nothing is listening there, runs phpunit with any arguments
+## given, and stops the servers it started when phpunit ends, so no browser
+## driver listens between test runs. Each server starts in a process group of
+## its own, so stopping it also stops the browser and PHP workers it spawned.
+##
+## WebDriverTestBase uses the W3C WebDriver protocol, so FunctionalJavascript needs a
+## driver rather than a browser library. Debian's chromium and chromium-driver
+## are a matched pair on amd64 and arm64, verified by apt's signatures; the
+## build asserts they share the major version chromedriver requires. The runner
+## uses only the pair recorded in /etc/agent-container-kit.
+# RUN apt-get update \
+#  && apt-get install -y --no-install-recommends chromium chromium-driver \
+#  && rm -rf /var/lib/apt/lists/* \
+#  && driver_major="$(chromedriver --version | awk '{print $2}' | cut -d. -f1)" \
+#  && browser_major="$(chromium --version | awk '{print $2}' | cut -d. -f1)" \
+#  && if [ -z "${driver_major}" ] || [ "${driver_major}" != "${browser_major}" ]; then \
+#       /usr/local/lib/agent-container-kit/fix-it.sh build-browser-driver-mismatch driver="${driver_major}" browser="${browser_major}" >&2; exit 1; \
+#     fi \
+#  && mkdir -p /etc/agent-container-kit \
+#  && command -v chromium > /etc/agent-container-kit/fjs-browser \
+#  && command -v chromedriver > /etc/agent-container-kit/fjs-driver \
+#  && chown root:root /etc/agent-container-kit/fjs-browser /etc/agent-container-kit/fjs-driver \
+#  && chmod 0444 /etc/agent-container-kit/fjs-browser /etc/agent-container-kit/fjs-driver
+#
+## Tests reach the site through SIMPLETEST_BASE_URL, which phpunit.xml usually
+## points at the web container. Exporting the loopback address is not enough: a
+## project whose autoloader loads environment files overwrites the variable in
+## every process that loads it. This bootstrap file sets it after core's test
+## bootstrap has required the autoloader, the only order that wins. --bootstrap
+## replaces phpunit.xml's own bootstrap, so the file requires core's itself.
+# RUN printf '%s\n' \
+#   '<?php' \
+#   '' \
+#   '// Points Drupal functional tests at the loopback server. Runs after the core' \
+#   '// test bootstrap, because a project autoloader that loads environment files' \
+#   '// can overwrite SIMPLETEST_BASE_URL.' \
+#   '$candidates = array_merge(' \
+#   '  glob("/var/www/html/core/tests/bootstrap.php") ?: [],' \
+#   '  glob("/var/www/html/*/core/tests/bootstrap.php") ?: []' \
+#   ');' \
+#   'if (!$candidates) {' \
+#   '  fwrite(STDERR, "loopback-bootstrap: no core/tests/bootstrap.php under /var/www/html\n");' \
+#   '  exit(1);' \
+#   '}' \
+#   'require $candidates[0];' \
+#   '' \
+#   '$loopback = getenv("LOOPBACK_BASE_URL") ?: "http://127.0.0.1:8888";' \
+#   'putenv("SIMPLETEST_BASE_URL=" . $loopback);' \
+#   '$_ENV["SIMPLETEST_BASE_URL"] = $loopback;' \
+#   '$_SERVER["SIMPLETEST_BASE_URL"] = $loopback;' \
+#   > /usr/local/lib/agent-container-kit/loopback-bootstrap.php \
+#  && chown root:root /usr/local/lib/agent-container-kit/loopback-bootstrap.php \
+#  && chmod 0444 /usr/local/lib/agent-container-kit/loopback-bootstrap.php \
+#  && php -l /usr/local/lib/agent-container-kit/loopback-bootstrap.php
+#
+## The MINK_* variables are exported rather than written into phpunit.xml, a
+## tracked file: PHPUnit's <env> elements do not overwrite an already-set
+## variable unless they carry force="true". PHP_CLI_SERVER_WORKERS is required, not
+## tuning: a page whose render requests another page of the same site deadlocks
+## a single-worker server.
+# RUN printf '%s\n' \
+#   '#!/bin/bash' \
+#   '# Starts chromedriver and a loopback site for this run when they are not' \
+#   '# listening, runs phpunit, and stops the servers it started.' \
+#   'set -eu' \
+#   'BROWSER="$(cat /etc/agent-container-kit/fjs-browser)"' \
+#   'DRIVER="$(cat /etc/agent-container-kit/fjs-driver)"' \
+#   'started=""' \
+#   'stop_started() { for pid in $started; do kill -- "-$pid" 2>/dev/null || true; done; }' \
+#   'trap stop_started EXIT' \
+#   'listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }' \
+#   'wait_for() { i=0; while [ "$i" -lt 100 ]; do listening "$1" && return 0; i=$((i+1)); sleep 0.1; done; return 1; }' \
+#   'if ! listening 9515; then setsid "$DRIVER" --port=9515 >/tmp/chromedriver.log 2>&1 & started="$started $!"; wait_for 9515 || { echo "drupal-fjs: chromedriver did not start; see /tmp/chromedriver.log" >&2; exit 1; }; fi' \
+#   'if ! listening 8888; then PHP_CLI_SERVER_WORKERS=6 setsid drush runserver 127.0.0.1:8888 >/tmp/runserver.log 2>&1 & started="$started $!"; wait_for 8888 || { echo "drupal-fjs: drush runserver did not start; see /tmp/runserver.log" >&2; exit 1; }; fi' \
+#   'export LOOPBACK_BASE_URL=http://127.0.0.1:8888' \
+#   "export MINK_DRIVER_CLASS='Drupal\\FunctionalJavascriptTests\\DrupalSelenium2Driver'" \
+#   'export MINK_DRIVER_ARGS_WEBDRIVER="[\"chrome\",{\"browserName\":\"chrome\",\"goog:chromeOptions\":{\"binary\":\"$BROWSER\",\"args\":[\"--headless=new\",\"--no-sandbox\",\"--disable-dev-shm-usage\",\"--disable-gpu\"]}},\"http://127.0.0.1:9515\"]"' \
+#   '/var/www/html/vendor/bin/phpunit -c /var/www/html/phpunit.xml --bootstrap /usr/local/lib/agent-container-kit/loopback-bootstrap.php "$@"' \
+#   > /usr/local/bin/drupal-fjs \
+#  && chown root:root /usr/local/bin/drupal-fjs \
+#  && chmod 0755 /usr/local/bin/drupal-fjs \
+#  && bash -n /usr/local/bin/drupal-fjs
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: rendered-site testing stack (visual and accessibility), for
+# rendered testing in the sidecar.
+## Prompt: Browser checks: lets the agent open pages in a browser inside the sidecar, take screenshots and run axe accessibility scans, with Playwright. Pages that load web fonts also need each font host added to .ddev/claude/egress-domains.list.
+## Question: Should the agent be able to check pages in a browser?
+#
+## Needs: Node 20 or newer from the baseline above; Playwright does not load on
+## an older one, and the check below stops the build on it.
+##
+## Egress: rendered pages match production only if the site's web fonts load,
+## so this block needs one line per web-font host the site's pages request,
+## and no other host, in .ddev/claude/egress-domains.list, the firewall's only
+## domain list. The site's analytics and help widgets stay blocked, and every
+## line added is egress surface.
+##
+## Lets the sidecar serve the site to itself (`drush runserver
+## 127.0.0.1:PORT`) and drive it with headless Chromium for screenshots and
+## axe-core scans, with no route to the web container. Installed at build
+## because the runtime firewall and the npm-registry deny block runtime
+## installs; the build runs on the Docker builder with open network. Chromium
+## must be launched with --no-sandbox --disable-dev-shm-usage in this
+## container.
+##
+## The browser is Debian's chromium at /usr/bin/chromium, verified by apt's
+## signatures. Playwright fetches no browser of its own, so scripts launch with
+## executablePath: '/usr/bin/chromium'. Playwright only guarantees the Chromium
+## build it bundles, so a Debian chromium far from that build can break
+## individual APIs.
+##
+## The npm packages are verified by HTTPS and npm's integrity check against the
+## registry, not by a pinned checksum. One version pins both playwright and
+## @playwright/test, because the runner and the library share playwright-core
+## and a mismatch fails confusingly rather than loudly.
+# ARG PLAYWRIGHT_VERSION=1.64.0
+# ARG AXE_PLAYWRIGHT_VERSION=4.13.0
+# ENV NODE_PATH=${NODE_PATH:+${NODE_PATH}:}/opt/render-tools/node_modules
+# RUN major="$(node -p 'process.versions.node.split(".")[0]')" \
+#  && if [ "${major}" -lt 20 ]; then /usr/local/lib/agent-container-kit/fix-it.sh build-fragment-node-too-old block="rendered-site testing" minimum="20" found="${major}" >&2; exit 1; fi \
+#  && apt-get update \
+#  && apt-get install -y --no-install-recommends chromium \
+#  && rm -rf /var/lib/apt/lists/* \
+#  && mkdir -p /opt/render-tools \
+#  && cd /opt/render-tools \
+#  && npm init -y >/dev/null 2>&1 \
+#  && npm install --no-fund --no-audit --save-exact \
+#       "playwright@${PLAYWRIGHT_VERSION}" \
+#       "@playwright/test@${PLAYWRIGHT_VERSION}" \
+#       "@axe-core/playwright@${AXE_PLAYWRIGHT_VERSION}" \
+#  && chmod -R a+rX /opt/render-tools
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: further accessibility checks, beyond axe-core from the render
+# block.
+## Prompt: More accessibility checkers: Lighthouse CI, pa11y-ci, a virtual screen reader and stylelint-a11y, on top of the browser checks.
+## Question: Should the agent have these extra accessibility checkers?
+#
+## Needs: the render block above, for its chromium and /opt/render-tools.
+##
+## @guidepup/virtual-screen-reader reports what a screen reader would
+## announce, not only whether the ARIA is present. It runs over the DOM, a
+## Playwright page included, with no real assistive technology.
+##
+## Lighthouse CI and pa11y-ci largely overlap axe in rule coverage; they add a
+## second opinion and a score gate. They use Debian's chromium through
+## CHROME_PATH (Lighthouse CI) and PUPPETEER_EXECUTABLE_PATH (pa11y's
+## Puppeteer), and PUPPETEER_SKIP_DOWNLOAD stops Puppeteer fetching a browser
+## at install.
+##
+## stylelint-a11y is not part of core's stylelint ruleset, so it runs as its
+## own pass with its own config and installs apart from core's lint set;
+## folding it into core's ruleset would make local results stop matching
+## drupal.org CI.
+##
+## These packages are verified by HTTPS and npm's integrity check against the
+## registry, not by a pinned checksum. They install the release current when this layer is
+## built, and Docker's build cache keeps that release until the cache is
+## skipped (`ddev restart --no-cache`).
+# ENV CHROME_PATH=/usr/bin/chromium
+# ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# RUN if [ ! -d /opt/render-tools ]; then /usr/local/lib/agent-container-kit/fix-it.sh build-fragment-block-needs block="further accessibility checks" needs="rendered-site testing" >&2; exit 1; fi \
+#  && cd /opt/render-tools \
+#  && npm install --no-fund --no-audit @guidepup/virtual-screen-reader \
+#  && chmod -R a+rX /opt/render-tools \
+#  && mkdir -p /opt/a11y-tools \
+#  && cd /opt/a11y-tools \
+#  && npm init -y >/dev/null 2>&1 \
+#  && PUPPETEER_SKIP_DOWNLOAD=true npm install --no-fund --no-audit @lhci/cli pa11y-ci stylelint-a11y \
+#  && ln -sf /opt/a11y-tools/node_modules/.bin/lhci /usr/local/bin/lhci \
+#  && ln -sf /opt/a11y-tools/node_modules/.bin/pa11y-ci /usr/local/bin/pa11y-ci \
+#  && chmod -R a+rX /opt/a11y-tools
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: Drupal core's lint set and twig-cs-fixer, for linting modules and
+# themes to core's standard in the sidecar.
+## Prompt: Drupal core's linting: lets the agent check code against Drupal core's standards with core's own lint tools and twig-cs-fixer.
+## Question: Should the agent be able to lint code to Drupal core's standards?
+#
+## Needs: Node and the PHP baseline above.
+##
+## The JS, CSS, YAML and spelling linters core configures, at the versions
+## core declares, so they agree with the configs core ships
+## (core/.eslintrc.json, core/.prettierrc.json, core/.stylelintrc.json).
+## Installed apart from core rather than by `npm ci` in core, which would pull
+## every core devDependency. CORE-LINT-PACKAGES follows the project's core
+## version; print the replacement from core's package.json by running this in
+## the project's docroot (the `docroot` value in .ddev/config.yaml):
+##
+##     python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["devDependencies"]; print(" ".join(f"\x27{k}@{v}\x27" for k,v in sorted(d.items()) if k.split("-")[0] in ("eslint","prettier","stylelint","cspell")))' core/package.json
+##
+## A theme written in SCSS also needs postcss-scss for stylelint to parse it.
+##
+## eslint resolves the shareable configs core's .eslintrc.json extends from
+## that file's directory, which has no node_modules here; the NODE_PATH entry
+## is how it finds them. Prettier looks for its config from the file being
+## formatted upward, so a file outside core never finds core's
+## .prettierrc.json and gets prettier's defaults; whatever runs the linters
+## passes core's options itself.
+##
+## These packages are verified by HTTPS and npm's integrity check against the
+## registry, not by a pinned checksum. The placeholder is checked first, the way the
+## baseline checks its own: a filled-in list holds name@version entries.
+# ENV NODE_PATH=${NODE_PATH:+${NODE_PATH}:}/opt/lint-tools/node_modules
+# RUN case "CORE-LINT-PACKAGES" in \
+#       *@*) ;; \
+#       *) /usr/local/lib/agent-container-kit/fix-it.sh build-fragment-placeholder name="CORE-LINT""-PACKAGES" value="CORE-LINT-PACKAGES" form="the package list the lint block's command prints" where="in the lint block, in its check and its npm install line" >&2; exit 1 ;; \
+#     esac \
+#  && mkdir -p /opt/lint-tools \
+#  && cd /opt/lint-tools \
+#  && npm init -y >/dev/null 2>&1 \
+#  && npm install --no-fund --no-audit CORE-LINT-PACKAGES \
+#  && for b in eslint prettier stylelint cspell; do \
+#       [ -x "/opt/lint-tools/node_modules/.bin/$b" ] \
+#         || { /usr/local/lib/agent-container-kit/fix-it.sh build-lint-package-missing tool="$b" >&2; exit 1; }; \
+#       ln -sf "/opt/lint-tools/node_modules/.bin/$b" "/usr/local/bin/$b"; \
+#     done \
+#  && chmod -R a+rX /opt/lint-tools
+#
+## twig-cs-fixer, in its own composer project so the project's composer.json
+## stays untouched. This install is verified by
+## HTTPS and Composer, not by a pinned checksum. It installs the release current
+## when this layer is built, and Docker's build cache keeps that release until
+## the cache is skipped (`ddev restart --no-cache`).
+# RUN mkdir -p /opt/php-tools \
+#  && cd /opt/php-tools \
+#  && COMPOSER_ALLOW_SUPERUSER=1 composer require --no-interaction --no-progress \
+#       vincentlanglet/twig-cs-fixer \
+#  && ln -sf /opt/php-tools/vendor/bin/twig-cs-fixer /usr/local/bin/twig-cs-fixer \
+#  && chmod -R a+rX /opt/php-tools
+# ---------------------------------------------------------------------------
+
+# Restore root for the guardrail layers that follow. Fragments are spliced
+# before them, and a fragment that leaves USER set to something else would
+# break the layers that install the firewall and the managed policy.
+USER root
